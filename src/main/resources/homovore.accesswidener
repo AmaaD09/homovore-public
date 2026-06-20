@@ -1,0 +1,13 @@
+accessWidener v2 named
+
+accessible field net/minecraft/client/Minecraft rightClickDelay I
+accessible field net/minecraft/network/protocol/game/ServerboundInteractPacket entityId I
+accessible method net/minecraft/network/protocol/game/ServerboundInteractPacket$Action getType ()Lnet/minecraft/network/protocol/game/ServerboundInteractPacket$ActionType;
+accessible class net/minecraft/network/protocol/game/ServerboundInteractPacket$ActionType
+accessible field net/minecraft/network/protocol/game/ServerboundInteractPacket action Lnet/minecraft/network/protocol/game/ServerboundInteractPacket$Action;
+accessible method net/minecraft/client/multiplayer/MultiPlayerGameMode ensureHasSentCarriedItem ()V
+accessible field net/minecraft/client/player/ClientInput moveVector Lnet/minecraft/world/phys/Vec2;
+accessible class net/minecraft/client/renderer/rendertype/RenderSetup$TextureBinding
+accessible field com/mojang/blaze3d/pipeline/RenderPipeline$UniformDescription name Ljava/lang/String;
+accessible field com/mojang/blaze3d/pipeline/RenderPipeline$UniformDescription type Lcom/mojang/blaze3d/shaders/UniformType;
+accessible field com/mojang/blaze3d/pipeline/RenderPipeline$UniformDescription textureFormat Lcom/mojang/blaze3d/textures/TextureFormat;

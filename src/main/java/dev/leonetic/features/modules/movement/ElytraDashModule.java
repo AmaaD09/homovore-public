@@ -1,0 +1,200 @@
+package dev.leonetic.features.modules.movement;
+
+import dev.leonetic.Homovore;
+import dev.leonetic.event.impl.entity.player.PreTickEvent;
+import dev.leonetic.event.system.Subscribe;
+import dev.leonetic.features.modules.Module;
+import dev.leonetic.manager.SwapManager;
+import dev.leonetic.util.inventory.InventoryUtil;
+import dev.leonetic.util.inventory.Result;
+import dev.leonetic.util.inventory.ResultType;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.inventory.ClickType;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.item.equipment.Equippable;
+
+import static dev.leonetic.util.inventory.InventoryUtil.FULL_SCOPE;
+
+public class ElytraDashModule extends Module {
+
+    private static final String ID = "ElytraDash";
+
+    private static final int ROCKET_SWAP_PRIORITY = 15;
+
+    private static final int CHEST_MENU_SLOT = 6;
+
+    private static final int OFFHAND_MENU_SLOT = 45;
+
+    private enum Phase {
+
+        EQUIP,
+
+        TAKEOFF,
+
+        FLY
+    }
+
+    private Phase phase = Phase.EQUIP;
+
+    private boolean weEquipped;
+
+    private int stowedChestSlot = -1;
+
+    private int ticksSinceRocket = Integer.MAX_VALUE / 2;
+
+    private int refireTicks;
+
+    public ElytraDashModule() {
+        super("ElytraDash", "Swap on your elytra, jump into flight, and auto-fire fireworks; swaps back on disable.", Category.MOVEMENT);
+    }
+
+    @Override
+    public void onEnable() {
+        phase = Phase.EQUIP;
+        weEquipped = false;
+        stowedChestSlot = -1;
+        ticksSinceRocket = Integer.MAX_VALUE / 2;
+    }
+
+    @Override
+    public void onDisable() {
+
+        if (canClickPlayerInventory() && mc.player.getItemBySlot(EquipmentSlot.CHEST).is(Items.ELYTRA)) {
+            if (weEquipped) {
+
+                swapChestArmorWith(stowedChestSlot);
+            } else {
+
+                Result chestplate = InventoryUtil.find(ElytraDashModule::isChestplate, FULL_SCOPE);
+                if (chestplate.found()) swapChestArmorWith(containerSlotOf(chestplate));
+            }
+        }
+        weEquipped = false;
+        stowedChestSlot = -1;
+    }
+
+    @Subscribe
+    private void onPreTick(PreTickEvent event) {
+        if (nullCheck()) return;
+
+        switch (phase) {
+            case EQUIP -> tickEquip();
+            case TAKEOFF -> tickTakeoff();
+            case FLY -> tickFly();
+        }
+    }
+
+    private void tickEquip() {
+        if (mc.player.getItemBySlot(EquipmentSlot.CHEST).is(Items.ELYTRA)) {
+
+            phase = Phase.TAKEOFF;
+            return;
+        }
+
+        if (!canClickPlayerInventory()) return;
+
+        Result elytra = InventoryUtil.find(Items.ELYTRA, FULL_SCOPE);
+        if (!elytra.found()) return;
+
+        int elytraSlot = containerSlotOf(elytra);
+        swapChestArmorWith(elytraSlot);
+        stowedChestSlot = elytraSlot;
+        weEquipped = true;
+        phase = Phase.TAKEOFF;
+    }
+
+    private void tickTakeoff() {
+        if (mc.player.isFallFlying()) {
+            enterFlight();
+            return;
+        }
+        if (mc.player.onGround()) {
+            mc.player.jumpFromGround();
+            return;
+        }
+
+        if (mc.getConnection() == null) return;
+        mc.getConnection().send(new ServerboundPlayerCommandPacket(
+                mc.player, ServerboundPlayerCommandPacket.Action.START_FALL_FLYING));
+        mc.player.startFallFlying();
+        enterFlight();
+    }
+
+    private void tickFly() {
+        if (!mc.player.isFallFlying()) {
+
+            phase = Phase.TAKEOFF;
+            return;
+        }
+        ticksSinceRocket++;
+        if (ticksSinceRocket >= refireTicks) fireRocket();
+    }
+
+    private void enterFlight() {
+        phase = Phase.FLY;
+        ticksSinceRocket = Integer.MAX_VALUE / 2;
+    }
+
+    private void fireRocket() {
+        Result rocket = InventoryUtil.find(Items.FIREWORK_ROCKET, FULL_SCOPE);
+        if (!rocket.found()) return;
+        if (!canClickPlayerInventory()) return;
+        ticksSinceRocket = 0;
+        refireTicks = InventoryUtil.fireworkRefireTicks(rocket.stack());
+
+        if (rocket.type() == ResultType.HOTBAR && rocket.slot() == InventoryUtil.selected()) {
+            mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND);
+            return;
+        }
+
+        SwapManager.SwapHandle handle = Homovore.swapManager.acquire(ID, ROCKET_SWAP_PRIORITY);
+        if (handle == null) return;
+        try {
+            int containerSlot = switch (rocket.type()) {
+                case OFFHAND -> OFFHAND_MENU_SLOT;
+                case HOTBAR  -> rocket.slot() + 36;
+                default      -> rocket.slot();
+            };
+            InventoryUtil.click(containerSlot, InventoryUtil.selected(), ClickType.SWAP);
+            mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND);
+            InventoryUtil.click(containerSlot, InventoryUtil.selected(), ClickType.SWAP);
+        } finally {
+            Homovore.swapManager.release(handle);
+        }
+    }
+
+    private void swapChestArmorWith(int itemContainerSlot) {
+        InventoryUtil.click(itemContainerSlot, 0, ClickType.PICKUP);
+        InventoryUtil.click(CHEST_MENU_SLOT, 0, ClickType.PICKUP);
+        InventoryUtil.click(itemContainerSlot, 0, ClickType.PICKUP);
+    }
+
+    private int containerSlotOf(Result result) {
+        if (result.type() == ResultType.OFFHAND) return OFFHAND_MENU_SLOT;
+        int slot = result.slot();
+        return slot < 9 ? slot + 36 : slot;
+    }
+
+    private static boolean isChestplate(ItemStack stack) {
+        if (stack.is(Items.ELYTRA)) return false;
+        Equippable equippable = stack.get(DataComponents.EQUIPPABLE);
+        return equippable != null && equippable.slot() == EquipmentSlot.CHEST;
+    }
+
+    private boolean canClickPlayerInventory() {
+        return mc.gameMode != null && mc.player.containerMenu == mc.player.inventoryMenu;
+    }
+
+    @Override
+    public String getDisplayInfo() {
+        return switch (phase) {
+            case EQUIP -> "Equipping";
+            case TAKEOFF -> "Takeoff";
+            case FLY -> "Flying";
+        };
+    }
+}
