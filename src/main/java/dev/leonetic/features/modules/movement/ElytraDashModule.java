@@ -23,7 +23,7 @@ public class ElytraDashModule extends Module {
 
     private static final String ID = "ElytraDash";
 
-    private static final int ROCKET_SWAP_PRIORITY = 15;
+    private static final int ROCKET_SWAP_PRIORITY = 66;
 
     private static final int CHEST_MENU_SLOT = 6;
 

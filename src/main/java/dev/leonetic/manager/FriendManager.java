@@ -5,6 +5,8 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import dev.leonetic.Homovore;
 import dev.leonetic.util.traits.Jsonable;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.ClientPacketListener;
 import net.minecraft.world.entity.player.Player;
 
 import java.util.ArrayList;
@@ -37,10 +39,23 @@ public class FriendManager implements Jsonable {
 
     public void addFriend(String name, long expiry) {
 
+        boolean alreadyFriend = friends.keySet().stream().anyMatch(friend -> friend.equalsIgnoreCase(name));
+
         friends.keySet().removeIf(friend -> friend.equalsIgnoreCase(name));
         friends.put(name, expiry);
 
         Homovore.enemyManager.removeEnemy(name);
+
+        if (!alreadyFriend) {
+            whisperFriendAdded(name);
+        }
+    }
+
+    private void whisperFriendAdded(String name) {
+        Minecraft mc = Minecraft.getInstance();
+        ClientPacketListener connection = mc.getConnection();
+        if (connection == null) return;
+        connection.sendCommand("w " + name + " Added as a friend on client");
     }
 
     public void removeFriend(String name) {

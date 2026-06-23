@@ -9,7 +9,6 @@ import dev.leonetic.features.modules.Module;
 import dev.leonetic.features.modules.combat.OffhandModule;
 import dev.leonetic.features.settings.Setting;
 import dev.leonetic.manager.SwapManager;
-import dev.leonetic.manager.SwapRequest;
 import dev.leonetic.mixin.client.ClientLevelAccessor;
 import dev.leonetic.mixin.entity.EntityRotationAccessor;
 import dev.leonetic.util.EnchantmentUtil;
@@ -20,6 +19,7 @@ import dev.leonetic.util.render.RenderUtil;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
+import net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
@@ -52,6 +52,11 @@ public class SpeedMineModule extends Module {
     private SwapManager.SwapHandle mineSwapHandle;
 
     private boolean heldPickaxeThisTick;
+
+    private int ticksSinceHold;
+    private static final int HOLD_GRACE_TICKS = 10;
+
+    private int spoofedFromSlot = -1;
 
     private boolean usingMainhandThisTick;
 
@@ -94,10 +99,16 @@ public class SpeedMineModule extends Module {
         delayedDestroyBlock = null;
         lastDelayedDestroyBlockPos = null;
 
+        if (spoofedFromSlot != -1) {
+            sendCarried(spoofedFromSlot);
+            spoofedFromSlot = -1;
+        }
+
         if (mineSwapHandle != null) {
             Homovore.swapManager.release(mineSwapHandle);
             mineSwapHandle = null;
         }
+        ticksSinceHold = 0;
     }
 
     private double serverTick() {
@@ -111,28 +122,31 @@ public class SpeedMineModule extends Module {
     private boolean withPickaxe(BlockState state, Runnable burst, boolean rebreak) {
         Result pickaxe = bestPickaxeResult(state);
 
-        if (!pickaxe.found() || pickaxe.holding()) {
-            if (!rebreak && pickaxe.holding() && mineSwapHandle != null) heldPickaxeThisTick = true;
+        if (!pickaxe.found() || pickaxe.holding()
+                || Homovore.swapManager.serverSlot() == pickaxe.slot()) {
+            if (!rebreak && mineSwapHandle != null) heldPickaxeThisTick = true;
             burst.run();
             return true;
         }
 
         if (usingMainhand()) return false;
 
-        if (!rebreak) {
-            if (mineSwapHandle == null || mineSwapHandle.isReleased()) {
-                mineSwapHandle = Homovore.swapManager.acquire("SpeedMine", MINE_SWAP_PRIORITY);
-                if (mineSwapHandle == null) return false;
-            }
+        if (Homovore.swapManager.isBlockedByOther("SpeedMine", MINE_SWAP_PRIORITY)) return false;
 
-            if (InventoryUtil.selected() != pickaxe.slot()) InventoryUtil.swap(pickaxe);
-            heldPickaxeThisTick = true;
-            burst.run();
-            return true;
+        int original = InventoryUtil.selected();
+        if (debugLog.getValue()) {
+            Homovore.LOGGER.info(
+                    "[SpeedMine] SILENT-SWAP {} tick={} serverSlot {} -> {} (pickaxe)",
+                    rebreak ? "rebreak" : "fresh-break",
+                    serverTick(), Homovore.swapManager.serverSlot(), pickaxe.slot());
         }
-
-        return Homovore.swapManager.submit(new SwapRequest(
-                "SpeedMine", MINE_SWAP_PRIORITY, pickaxe, burst, false));
+        sendCarried(pickaxe.slot());
+        try {
+            burst.run();
+        } finally {
+            sendCarried(original);
+        }
+        return true;
     }
 
     private boolean usingMainhand() {
@@ -248,6 +262,7 @@ public class SpeedMineModule extends Module {
             }
         }
 
+        sustainPrimaryHold();
         tryFinalizeRebreak();
         sustainDelayedDestroy();
 
@@ -263,11 +278,37 @@ public class SpeedMineModule extends Module {
         releaseMineSwap();
     }
 
-    private void releaseMineSwap() {
-        if (!heldPickaxeThisTick && mineSwapHandle != null) {
-            Homovore.swapManager.release(mineSwapHandle);
-            mineSwapHandle = null;
+    private void onMineSwapPreempted() {
+        if (spoofedFromSlot != -1) {
+            sendCarried(spoofedFromSlot);
+            spoofedFromSlot = -1;
         }
+        mineSwapHandle = null;
+        heldPickaxeThisTick = false;
+        ticksSinceHold = 0;
+    }
+
+    private void releaseMineSwap() {
+        if (heldPickaxeThisTick) {
+            ticksSinceHold = 0;
+            return;
+        }
+        if (mineSwapHandle == null) return;
+
+        if (++ticksSinceHold <= HOLD_GRACE_TICKS) return;
+
+        if (debugLog.getValue()) {
+            Homovore.LOGGER.info(
+                    "[SpeedMine] SILENT-SWAP hold END tick={} (idle {}t) restoring serverSlot -> {} and releasing handle",
+                    serverTick(), ticksSinceHold, spoofedFromSlot);
+        }
+        if (spoofedFromSlot != -1) {
+            sendCarried(spoofedFromSlot);
+            spoofedFromSlot = -1;
+        }
+        Homovore.swapManager.release(mineSwapHandle);
+        mineSwapHandle = null;
+        ticksSinceHold = 0;
     }
 
     private boolean tryFinalizeRebreak() {
@@ -301,12 +342,23 @@ public class SpeedMineModule extends Module {
         BlockState state = mc.level.getBlockState(delayedDestroyBlock.blockPos);
         if (state.isAir()) return;
 
-        if (holdPickaxe(state)) {
+        if (holdPickaxe(state, delayedDestroyBlock.blockPos)) {
             delayedDestroyBlock.ticksHeldPickaxe++;
         }
     }
 
-    private boolean holdPickaxe(BlockState state) {
+    private void sustainPrimaryHold() {
+        if (hasDelayedDestroy()) return;
+        if (!hasRebreakBlock()) return;
+        if (!inBreakRange(rebreakBlock.blockPos)) return;
+
+        BlockState state = mc.level.getBlockState(rebreakBlock.blockPos);
+        if (state.isAir() || !canBreak(rebreakBlock.blockPos)) return;
+
+        holdPickaxe(state, rebreakBlock.blockPos);
+    }
+
+    private boolean holdPickaxe(BlockState state, BlockPos pos) {
         Result pickaxe = bestPickaxeResult(state);
 
         if (!pickaxe.found() || pickaxe.holding()) {
@@ -319,8 +371,19 @@ public class SpeedMineModule extends Module {
         if (mineSwapHandle == null || mineSwapHandle.isReleased()) {
             mineSwapHandle = Homovore.swapManager.acquire("SpeedMine", MINE_SWAP_PRIORITY);
             if (mineSwapHandle == null) return false;
+            mineSwapHandle.onPreempt(this::onMineSwapPreempted);
         }
-        if (InventoryUtil.selected() != pickaxe.slot()) InventoryUtil.swap(pickaxe);
+
+        if (spoofedFromSlot == -1) spoofedFromSlot = InventoryUtil.selected();
+        if (Homovore.swapManager.serverSlot() != pickaxe.slot()) {
+            if (debugLog.getValue()) {
+                Homovore.LOGGER.info(
+                        "[SpeedMine] SILENT-SWAP hold tick={} serverSlot {} -> {} (pickaxe) pos={} restoreTo={}",
+                        serverTick(), Homovore.swapManager.serverSlot(), pickaxe.slot(),
+                        pos, spoofedFromSlot);
+            }
+            sendCarried(pickaxe.slot());
+        }
         heldPickaxeThisTick = true;
         return true;
     }
@@ -441,6 +504,11 @@ public class SpeedMineModule extends Module {
     private boolean canBreak(BlockPos pos) {
         BlockState s = mc.level.getBlockState(pos);
         return !s.isAir() && s.getDestroySpeed(mc.level, pos) >= 0;
+    }
+
+    private void sendCarried(int slot) {
+        if (slot < 0 || mc.getConnection() == null) return;
+        mc.getConnection().send(new ServerboundSetCarriedItemPacket(slot));
     }
 
     private void sendAction(ServerboundPlayerActionPacket.Action action, BlockPos pos, Direction dir) {

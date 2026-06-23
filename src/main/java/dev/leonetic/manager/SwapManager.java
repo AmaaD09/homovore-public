@@ -219,6 +219,7 @@ public class SwapManager extends Feature {
             }
             log("acquire " + id + "/" + priority + " preempts " + active.id + "/" + active.priority);
             active.released = true;
+            if (active.onPreempt != null) active.onPreempt.run();
         } else {
             log("acquire " + id + "/" + priority);
         }
@@ -240,11 +241,16 @@ public class SwapManager extends Feature {
         return active != null && active.priority >= priority;
     }
 
+    public boolean isBlockedByOther(String id, int priority) {
+        return active != null && !active.id.equals(id) && active.priority >= priority;
+    }
+
     public static final class SwapHandle {
         public final String id;
         public final int priority;
         public final int originalSlot;
         boolean released;
+        Runnable onPreempt;
 
         SwapHandle(String id, int priority, int originalSlot) {
             this.id = id;
@@ -253,5 +259,7 @@ public class SwapManager extends Feature {
         }
 
         public boolean isReleased() { return released; }
+
+        public void onPreempt(Runnable r) { this.onPreempt = r; }
     }
 }
