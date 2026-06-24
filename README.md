@@ -4,7 +4,7 @@
 
 <h1 align="center">Homovore</h1>
 
-### Join our discord: https://discord.gg/Ftf6RgvcGr
+### Join our discord: https://discord.gg/yMD5mhmNEc
 
 <p align="center">
   <a href="https://github.com/leonetics/homovore-public/releases">
@@ -16,7 +16,7 @@
   <a href="https://github.com/leonetics/homovore-public/releases">
     <img src="https://img.shields.io/github/v/release/leonetics/homovore-public?color=blue&label=Latest%20Release" alt="Latest Release" />
   </a>
-  <a href="https://discord.gg/Ftf6RgvcGr">
+  <a href="https://discord.gg/yMD5mhmNEc">
     <img src="https://img.shields.io/discord/1481831852950950043?color=7289DB&label=Discord" alt="Discord" />
   </a>
 </p>
