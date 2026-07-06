@@ -43,6 +43,7 @@
     "render.MixinShaderLevelRenderer",
     "render.MixinSkyRenderer",
     "render.MixinEntityRenderDispatcher",
+    "render.MixinLivingEntityRenderer",
     "render.MixinSubmitNodeCollection",
     "render.RenderTypeAccessor",
     "render.RenderSetupAccessor",

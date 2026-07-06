@@ -66,6 +66,7 @@ public class ModuleManager implements Jsonable, Util {
         register(new AutoLogModule());
         register(new AutoSwordModule());
         register(new AutoCrystalModule());
+        register(new AnchorAuraModule());
         register(new AutoMineModule());
         register(new AutoXPModule());
         register(new VelocityModule());

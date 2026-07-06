@@ -263,6 +263,50 @@ public class PlacementManager extends Feature {
     }
 
     @Nullable
+    public BlockHitResult prepareAirPlaceHit(BlockPos pos) {
+        if (isOnCooldown(pos)) return null;
+        if (!PlaceUtil.canPlace(pos)) return null;
+
+        Vec3 eye = mc.player.getEyePosition();
+        Direction bestSide = null;
+        double bestDistSq = Double.MAX_VALUE;
+        for (Direction side : Direction.values()) {
+            BlockPos neighbour = pos.relative(side);
+            var state = mc.level.getBlockState(neighbour);
+            if (state.isAir()) continue;
+            if (!state.getFluidState().isEmpty()) continue;
+            if (isInteractable(state.getBlock())) continue;
+
+            Vec3 hit = Vec3.atCenterOf(pos).relative(side, 0.5);
+            Vec3 normal = new Vec3(-side.getStepX(), -side.getStepY(), -side.getStepZ());
+            if (eye.subtract(hit).dot(normal) <= 0.01) continue;
+
+            double distSq = eye.distanceToSqr(hit);
+            if (distSq < bestDistSq) {
+                bestDistSq = distSq;
+                bestSide = side;
+            }
+        }
+
+        if (bestSide != null) {
+            return new BlockHitResult(
+                    Vec3.atCenterOf(pos).relative(bestSide, 0.5),
+                    bestSide.getOpposite(),
+                    pos.relative(bestSide),
+                    false);
+        }
+
+        Direction dir = getAirPlaceDirection(pos);
+        return new BlockHitResult(getAirPlaceHitPos(pos, dir), dir, pos, false);
+    }
+
+    public void notePlacement(BlockPos pos) {
+        long stamp = System.currentTimeMillis();
+        sentAt.put(pos, stamp);
+        recentPlacements.addLast(stamp);
+    }
+
+    @Nullable
     public Direction getPlaceSide(BlockPos pos) {
 
         Vec3 eye = mc.player.getEyePosition();
