@@ -42,6 +42,13 @@ public abstract class MixinInGameHud {
         }
     }
 
+    @Inject(method = "renderCrosshair", at = @At("HEAD"), cancellable = true)
+    private void homovore$noCrosshair(GuiGraphics context, DeltaTracker tickCounter, CallbackInfo ci) {
+        if (NoRenderModule.isActive(m -> m.noCrosshair.getValue())) {
+            ci.cancel();
+        }
+    }
+
     @Inject(method = "renderPortalOverlay", at = @At("HEAD"), cancellable = true)
     private void homovore$noPortal(GuiGraphics context, float alpha, CallbackInfo ci) {
         if (NoRenderModule.isActive(m -> m.noPortal.getValue())) {
