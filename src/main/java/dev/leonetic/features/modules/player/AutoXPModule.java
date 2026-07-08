@@ -124,7 +124,7 @@ public class AutoXPModule extends Module {
         float pitch = 90f;
         Homovore.rotationManager.submit(new RotationRequest("AutoXP", 40, yaw, pitch, RotationRequest.Mode.SILENT));
         mc.gameMode.ensureHasSentCarriedItem();
-        Homovore.swapManager.submit(new SwapRequest("AutoXP", 40, xp, r -> {
+        Homovore.swapManager.submit(new SwapRequest("AutoXP", 100, xp, r -> {
             for (int i = 0; i < amount; i++) {
                 try (var handler = ((ClientLevelAccessor) mc.level).homovore$getBlockStatePredictionHandler().startPredicting()) {
                     mc.getConnection().send(new ServerboundUseItemPacket(r.hand(), handler.currentSequence(), yaw, pitch));
