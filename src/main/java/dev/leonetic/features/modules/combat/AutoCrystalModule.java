@@ -796,15 +796,13 @@ public class AutoCrystalModule extends Module {
 
         candidates.sort((a, b) -> Float.compare(b.bound, a.bound));
 
-        PlaceTarget best = null;
+        PlaceTarget best = null;          // best spot that is free right now
+        PlaceTarget bestInFlight = null;  // best spot still round-tripping (fallback)
+        long pendingWindow = placePendingMs();
         for (int i = 0, n = candidates.size(); i < n; i++) {
             PlaceCandidate c = candidates.get(i);
-            if (best != null && c.bound <= best.damage) break;
 
             if (isBlocked(c.airPos)) continue;
-            long pendingTs = crystalPlaces.get(c.airPos.asLong());
-            if (pendingTs != 0L && now - pendingTs < PLACE_PENDING_MS) continue;
-
             if (!selfDamageOk(c.crystalCenter, null, maxSelf, playerHealth)) continue;
 
             float totalDmg = 0;
@@ -818,9 +816,23 @@ public class AutoCrystalModule extends Module {
                 anyTarget = true;
             }
             if (!anyTarget) continue;
-            if (best == null || totalDmg > best.damage) best = new PlaceTarget(c.base, totalDmg);
+
+            long pendingTs = crystalPlaces.get(c.airPos.asLong());
+            boolean inFlight = pendingTs != 0L && now - pendingTs < pendingWindow;
+            if (inFlight) {
+                if (bestInFlight == null || totalDmg > bestInFlight.damage)
+                    bestInFlight = new PlaceTarget(c.base, totalDmg);
+            } else {
+                if (best == null || totalDmg > best.damage)
+                    best = new PlaceTarget(c.base, totalDmg);
+            }
         }
-        return best;
+        // Prefer a free spot so consecutive ticks pipeline across positions rather
+        // than serializing on one spot (a single spot is round-trip-capped to ~10
+        // CPS on a remote server; ~20 in singleplayer). Fall back to the just-placed
+        // spot only when nothing else is free, so single-spot scenarios still
+        // re-place every tick exactly as before.
+        return best != null ? best : bestInFlight;
     }
 
     private boolean isBurrowBlock(BlockState state) {
@@ -1185,6 +1197,25 @@ public class AutoCrystalModule extends Module {
         int dx = airPos.getX() - feet.getX();
         int dz = airPos.getZ() - feet.getZ();
         return (Math.abs(dx) == 1 && dz == 0) || (Math.abs(dz) == 1 && dx == 0);
+    }
+
+    private int currentPingMs() {
+        var conn = mc.getConnection();
+        if (conn != null && mc.player != null) {
+            var info = conn.getPlayerInfo(mc.player.getUUID());
+            if (info != null && info.getLatency() > 0) return info.getLatency();
+        }
+        return 0;
+    }
+
+    // How long a just-placed spot is treated as "in flight" — roughly one crystal
+    // round trip (ping there and back, plus a couple ticks of server processing).
+    // findBestPlace uses this to rotate to other spots while a spot round-trips,
+    // which is what lets CPS exceed the single-spot ~10 cap on a remote server.
+    // ponytail: ceiling is ping-derived; if 2b2t is laggier than its ping graph
+    // shows, raise the 80ms floor. Global lock is fine here — one placement/tick.
+    private long placePendingMs() {
+        return Math.min(400L, Math.max(80L, currentPingMs() * 2L + 60L));
     }
 
     private void ageCrystalPlaces() {
