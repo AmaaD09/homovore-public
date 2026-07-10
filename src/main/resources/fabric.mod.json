@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "homovore",
+  "version": "${version}",
+  "name": "Homovore",
+  "description": "A Fabric utility mod for Minecraft.",
+  "authors": [
+    "Leonetic",
+    "widerthaneurasia"
+  ],
+  "contact": {
+  },
+  "license": "AGPL-3.0-or-later",
+  "icon": "assets/homovore/icon.png",
+  "environment": "client",
+  "accessWidener": "homovore.accesswidener",
+  "entrypoints": {
+    "client": [
+      "dev.leonetic.Homovore"
+    ],
+    "main": [
+      "dev.leonetic.Homovore"
+    ]
+  },
+  "mixins": [
+    "homovore.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric": "*",
+    "minecraft": "${minecraft_version}"
+  }
+}
