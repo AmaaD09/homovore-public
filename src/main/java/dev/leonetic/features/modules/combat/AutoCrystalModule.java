@@ -115,7 +115,7 @@ public class AutoCrystalModule extends Module {
     private long     renderStartMs = 0L;
     private AABB     smoothBox = null;
 
-    private enum RenderMode { NONE, GRADIENT, GRADIENT_SMOOTH, PULSE }
+    private enum RenderMode { NONE, GRADIENT, GRADIENT_SMOOTH, BOX_SMOOTH, PULSE }
 
     private static final double  PLACE_RANGE    = 6.0;
     private static final double  BASE_PLACE_RANGE = 6.0;
@@ -231,9 +231,27 @@ public class AutoCrystalModule extends Module {
         switch (renderMode.getValue()) {
             case GRADIENT        -> drawGradient(event, false);
             case GRADIENT_SMOOTH -> drawGradient(event, true);
+            case BOX_SMOOTH      -> drawBoxSmooth(event);
             case PULSE           -> drawPulse(event, elapsed, life);
             default -> { }
         }
+    }
+
+    private void updateSmoothBox(AABB target) {
+        if (smoothBox == null) {
+            smoothBox = target;
+        } else {
+            double f = 1.0 / smoothness.getValue();
+            smoothBox = new AABB(
+                    lerp(smoothBox.minX, target.minX, f), lerp(smoothBox.minY, target.minY, f), lerp(smoothBox.minZ, target.minZ, f),
+                    lerp(smoothBox.maxX, target.maxX, f), lerp(smoothBox.maxY, target.maxY, f), lerp(smoothBox.maxZ, target.maxZ, f));
+        }
+    }
+
+    private void drawBoxSmooth(Render3DEvent event) {
+        updateSmoothBox(new AABB(renderPos.below()));
+        RenderUtil.drawBoxFilled(event.getMatrix(), smoothBox, sideColor.getValue());
+        RenderUtil.drawBox(event.getMatrix(), smoothBox, lineColor.getValue(), lineWidth.getValue());
     }
 
     private void drawGradient(Render3DEvent event, boolean smooth) {
@@ -247,15 +265,7 @@ public class AutoCrystalModule extends Module {
 
         double x1, z1, x2, z2, yTop;
         if (smooth) {
-            AABB target = new AABB(basePos);
-            if (smoothBox == null) {
-                smoothBox = target;
-            } else {
-                double f = 1.0 / smoothness.getValue();
-                smoothBox = new AABB(
-                        lerp(smoothBox.minX, target.minX, f), lerp(smoothBox.minY, target.minY, f), lerp(smoothBox.minZ, target.minZ, f),
-                        lerp(smoothBox.maxX, target.maxX, f), lerp(smoothBox.maxY, target.maxY, f), lerp(smoothBox.maxZ, target.maxZ, f));
-            }
+            updateSmoothBox(new AABB(basePos));
             x1 = smoothBox.minX; z1 = smoothBox.minZ;
             x2 = smoothBox.maxX; z2 = smoothBox.maxZ;
             yTop = smoothBox.maxY;

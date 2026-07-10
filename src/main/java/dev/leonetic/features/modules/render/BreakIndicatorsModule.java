@@ -22,8 +22,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Queue;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 public class BreakIndicatorsModule extends Module {
@@ -33,14 +32,16 @@ public class BreakIndicatorsModule extends Module {
     private final Setting<Float> completionAmount = num("FullCompletionAmount", 1.0f, 0.0f, 1.5f).setPage("General");
     private final Setting<Float> removeCompletionAmount = num("ForceRemoveCompletionAmount", 1.3f, 0.0f, 1.5f).setPage("General");
     private final Setting<Boolean> ignoreFriends = bool("IgnoreFriends", false).setPage("General");
+    private final Setting<Boolean> holdRebreak = bool("HoldRebreak", true).setPage("General");
 
     private final Setting<Boolean> render = bool("DoRender", true).setPage("Render");
     private final Setting<Float> lineWidth = num("LineWidth", 1.5f, 0.5f, 5.0f).setPage("Render");
     private final Setting<Color> sideColor = color("SideColor", 255, 0, 80, 10).setPage("Render");
     private final Setting<Color> lineColor = color("LineColor", 255, 255, 255, 40).setPage("Render");
 
-    private final Queue<BlockBreak> breakPackets = new ConcurrentLinkedQueue<>();
-    private final Map<BlockPos, BlockBreak> breakStartTimes = new HashMap<>();
+    private static final long BREAK_TIME_MS = 2500L;
+
+    private final Map<BlockPos, BreakEntry> breaks = new ConcurrentHashMap<>();
 
     public BreakIndicatorsModule() {
         super("BreakIndicators", "Renders the progress of a block being broken.", Category.RENDER);
@@ -48,35 +49,82 @@ public class BreakIndicatorsModule extends Module {
 
     @Override
     public void onEnable() {
-        breakPackets.clear();
-        breakStartTimes.clear();
+        breaks.clear();
     }
 
     @Override
     public void onDisable() {
-        breakPackets.clear();
-        breakStartTimes.clear();
+        breaks.clear();
     }
 
     @Subscribe
     private void onPacket(PacketEvent.Receive event) {
-        if (nullCheck()) return;
+        if (mc.level == null || mc.player == null) return;
         if (!(event.getPacket() instanceof ClientboundBlockDestructionPacket packet)) return;
 
+        BlockPos pos = packet.getPos().immutable();
+        BlockState state = mc.level.getBlockState(pos);
+        if (!InteractionUtil.canBreak(pos, state)) return;
+
         Entity entity = mc.level.getEntity(packet.getId());
-        breakPackets.add(new BlockBreak(packet.getPos().immutable(), currentTick(0.0f), entity));
+        int id = packet.getId();
+        long now = System.currentTimeMillis();
+
+        // A new mine from this player clears their held rebreak markers.
+        if (holdRebreak.getValue()) {
+            breaks.values().removeIf(b -> b.held && b.entityId == id && !b.pos.equals(pos));
+        }
+
+        BreakEntry existing = breaks.get(pos);
+        if (existing != null) {
+            // Re-mining a held block restarts its progress animation.
+            if (existing.held) {
+                existing.held = false;
+                existing.startMs = now;
+            }
+            return;
+        }
+
+        if (useDoubleminePrediction.getValue() && entity instanceof Player) {
+            List<BreakEntry> playerBreaks = breaks.values().stream()
+                    .filter(b -> b.entity == entity && !b.pos.equals(pos))
+                    .sorted(Comparator.comparingLong(b -> b.startMs))
+                    .toList();
+
+            if (playerBreaks.size() >= 2) {
+                breaks.remove(playerBreaks.getLast().pos);
+            }
+        }
+
+        breaks.put(pos, new BreakEntry(pos, id, entity, now));
     }
 
-    public boolean isBlockBeingBroken(BlockPos blockPos) {
-        return breakStartTimes.containsKey(blockPos);
+    public boolean isBlockBeingBroken(BlockPos pos) {
+        return breaks.containsKey(pos);
+    }
+
+    public boolean isBlockBeingBrokenByFriend(BlockPos pos) {
+        BreakEntry entry = breaks.get(pos);
+        return entry != null && entry.entity instanceof Player player && Homovore.friendManager.isFriend(player);
+    }
+
+    public boolean isBlockBeingBrokenBySelf(BlockPos pos) {
+        if (mc.player == null) return false;
+        BreakEntry entry = breaks.get(pos);
+        return entry != null && entry.entityId == mc.player.getId();
+    }
+
+    public double getBlockBreakProgress(BlockPos pos) {
+        BreakEntry entry = breaks.get(pos);
+        if (entry == null) return 0.0;
+        return entry.held ? 1.0 : Math.clamp(entry.progress(System.currentTimeMillis()), 0.0, 1.0);
     }
 
     public Map<BlockPos, BreakInfo> getActiveBreaksSnapshot() {
-        drainBreakPackets(currentTick(0.0f));
         Map<BlockPos, BreakInfo> snapshot = new HashMap<>();
-        for (Map.Entry<BlockPos, BlockBreak> entry : breakStartTimes.entrySet()) {
-            Entity entity = entry.getValue().entity;
-            snapshot.put(entry.getKey(), new BreakInfo(entry.getKey(), entity instanceof Player player ? player : null));
+        for (BreakEntry entry : breaks.values()) {
+            if (entry.held) continue;
+            snapshot.put(entry.pos, new BreakInfo(entry.pos, entry.entity instanceof Player player ? player : null));
         }
         return snapshot;
     }
@@ -85,101 +133,82 @@ public class BreakIndicatorsModule extends Module {
     private void onRender(Render3DEvent event) {
         if (nullCheck()) return;
 
-        double currentTick = currentTick(event.getDelta());
-        drainBreakPackets(currentTick);
+        long now = System.currentTimeMillis();
 
-        Iterator<Map.Entry<BlockPos, BlockBreak>> iterator = breakStartTimes.entrySet().iterator();
+        Iterator<Map.Entry<BlockPos, BreakEntry>> iterator = breaks.entrySet().iterator();
         while (iterator.hasNext()) {
-            Map.Entry<BlockPos, BlockBreak> entry = iterator.next();
-            BlockState state = mc.level.getBlockState(entry.getKey());
+            BreakEntry entry = iterator.next().getValue();
+            // Held rebreak markers persist until a new mine from that player (cleared in onPacket).
+            if (entry.held) continue;
 
-            if (state.isAir()
-                    || entry.getValue().progress(currentTick) > removeCompletionAmount.getValue()
-                    || !InteractionUtil.canBreak(entry.getKey(), state)) {
-                iterator.remove();
+            BlockState state = mc.level.getBlockState(entry.pos);
+            boolean finished = state.isAir()
+                    || entry.progress(now) > removeCompletionAmount.getValue()
+                    || !InteractionUtil.canBreak(entry.pos, state);
+            if (finished) {
+                if (holdRebreak.getValue()) {
+                    entry.held = true;
+                } else {
+                    iterator.remove();
+                }
             }
         }
 
         if (useDoubleminePrediction.getValue()) {
-            Map<Player, List<BlockBreak>> playerBreakingBlocks = breakStartTimes.values().stream()
-                    .sorted(Comparator.comparingDouble(blockBreak -> blockBreak.startTick))
-                    .filter(blockBreak -> blockBreak.entity instanceof Player)
-                    .collect(Collectors.groupingBy(blockBreak -> (Player) blockBreak.entity, Collectors.toList()));
+            Map<Player, List<BreakEntry>> playerBreakingBlocks = breaks.values().stream()
+                    .filter(entry -> entry.entity instanceof Player)
+                    .sorted(Comparator.comparingLong(entry -> entry.startMs))
+                    .collect(Collectors.groupingBy(entry -> (Player) entry.entity, Collectors.toList()));
 
-            for (Map.Entry<Player, List<BlockBreak>> entry : playerBreakingBlocks.entrySet()) {
-                entry.getValue().forEach(x -> x.isRebreak = false);
-
-                if (entry.getValue().size() >= 2) {
-                    entry.getValue().getLast().isRebreak = true;
-                }
+            for (List<BreakEntry> list : playerBreakingBlocks.values()) {
+                list.forEach(entry -> entry.isRebreak = false);
+                if (list.size() >= 2) list.getLast().isRebreak = true;
             }
         }
 
         if (!render.getValue()) return;
 
-        for (Map.Entry<BlockPos, BlockBreak> entry : breakStartTimes.entrySet()) {
-            if (ignoreFriends.getValue() && entry.getValue().entity instanceof Player player
+        for (BreakEntry entry : breaks.values()) {
+            if (ignoreFriends.getValue() && entry.entity instanceof Player player
                     && Homovore.friendManager.isFriend(player)) {
                 continue;
             }
 
-            entry.getValue().renderBlock(event, currentTick);
+            entry.renderBlock(event, now);
         }
-    }
-
-    private void drainBreakPackets(double currentTick) {
-        while (!breakPackets.isEmpty()) {
-            BlockBreak breakEvent = breakPackets.remove();
-
-            if (useDoubleminePrediction.getValue() && breakEvent.entity instanceof Player) {
-                List<BlockBreak> playerBreakingBlocks = breakStartTimes.values().stream()
-                        .filter(x -> x.entity == breakEvent.entity && !x.blockPos.equals(breakEvent.blockPos))
-                        .sorted(Comparator.comparingDouble(x -> x.startTick))
-                        .toList();
-
-                if (playerBreakingBlocks.size() >= 2) {
-                    breakStartTimes.remove(playerBreakingBlocks.getLast().blockPos);
-                }
-            }
-
-            BlockBreak existing = breakStartTimes.get(breakEvent.blockPos);
-            if (existing == null) {
-                breakStartTimes.put(breakEvent.blockPos, breakEvent);
-            }
-        }
-    }
-
-    private double currentTick(float partialTick) {
-        return mc.level.getGameTime() + partialTick;
     }
 
     public record BreakInfo(BlockPos pos, Player player) {}
 
-    private class BlockBreak {
-        private final BlockPos blockPos;
-        private final double startTick;
+    private final class BreakEntry {
+        private final BlockPos pos;
+        private final int entityId;
         private final Entity entity;
+        private long startMs;
         private boolean isRebreak;
+        private boolean held;
 
-        private BlockBreak(BlockPos blockPos, double startTick, Entity entity) {
-            this.blockPos = blockPos;
-            this.startTick = startTick;
+        private BreakEntry(BlockPos pos, int entityId, Entity entity, long startMs) {
+            this.pos = pos;
+            this.entityId = entityId;
             this.entity = entity;
+            this.startMs = startMs;
         }
 
-        private void renderBlock(Render3DEvent event, double currentTick) {
-            BlockState state = mc.level.getBlockState(blockPos);
-            VoxelShape shape = state.getShape(mc.level, blockPos);
+        private void renderBlock(Render3DEvent event, long now) {
+            BlockState state = mc.level.getBlockState(pos);
+            VoxelShape shape = state.getShape(mc.level, pos);
             if (shape.isEmpty()) {
-                RenderUtil.drawBoxFilled(event.getMatrix(), blockPos, sideColor.getValue());
-                RenderUtil.drawBox(event.getMatrix(), blockPos, lineColor.getValue(), lineWidth.getValue());
+                RenderUtil.drawBoxFilled(event.getMatrix(), pos, sideColor.getValue());
+                RenderUtil.drawBox(event.getMatrix(), pos, lineColor.getValue(), lineWidth.getValue());
                 return;
             }
 
             AABB orig = shape.bounds();
 
             double completion = isRebreak ? rebreakCompletionAmount.getValue() : completionAmount.getValue();
-            double scale = completion <= 0.0 ? 1.0 : Math.clamp(progress(currentTick) / completion, 0.0, 1.0);
+            double scale = held ? 1.0
+                    : (completion <= 0.0 ? 1.0 : Math.clamp(progress(now) / completion, 0.0, 1.0));
 
             double centerX = (orig.minX + orig.maxX) * 0.5;
             double centerY = (orig.minY + orig.maxY) * 0.5;
@@ -188,23 +217,20 @@ public class BreakIndicatorsModule extends Module {
             double halfY = orig.getYsize() * scale * 0.5;
             double halfZ = orig.getZsize() * scale * 0.5;
 
-            double x1 = blockPos.getX() + centerX - halfX;
-            double y1 = blockPos.getY() + centerY - halfY;
-            double z1 = blockPos.getZ() + centerZ - halfZ;
-            double x2 = blockPos.getX() + centerX + halfX;
-            double y2 = blockPos.getY() + centerY + halfY;
-            double z2 = blockPos.getZ() + centerZ + halfZ;
+            double x1 = pos.getX() + centerX - halfX;
+            double y1 = pos.getY() + centerY - halfY;
+            double z1 = pos.getZ() + centerZ - halfZ;
+            double x2 = pos.getX() + centerX + halfX;
+            double y2 = pos.getY() + centerY + halfY;
+            double z2 = pos.getZ() + centerZ + halfZ;
 
             AABB renderBox = new AABB(x1, y1, z1, x2, y2, z2);
             RenderUtil.drawBoxFilled(event.getMatrix(), renderBox, sideColor.getValue());
             RenderUtil.drawBox(event.getMatrix(), renderBox, lineColor.getValue(), lineWidth.getValue());
         }
 
-        private double progress(double currentTick) {
-            BlockState state = mc.level.getBlockState(blockPos);
-            int slot = InteractionUtil.fastestToolSlot(state);
-            double speed = InteractionUtil.rawMiningSpeed(slot, state, true);
-            return InteractionUtil.breakDelta(speed, state) * (currentTick - startTick);
+        private double progress(long now) {
+            return (double) (now - startMs) / BREAK_TIME_MS;
         }
     }
 }
