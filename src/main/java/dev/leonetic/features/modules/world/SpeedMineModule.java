@@ -281,8 +281,12 @@ public class SpeedMineModule extends Module {
             rebreakBlock = null;
         }
 
-        if (hasDelayedDestroy() && (mc.level.getBlockState(delayedDestroyBlock.blockPos).isAir()
-                || !canBreak(delayedDestroyBlock.blockPos))) {
+        if (hasDelayedDestroy() && mc.level.getBlockState(delayedDestroyBlock.blockPos).isAir()) {
+            BlockPos completedPos = delayedDestroyBlock.blockPos;
+            delayedDestroyBlock = null;
+            releaseMineSwapForPlacement();
+            fireFinish(completedPos);
+        } else if (hasDelayedDestroy() && !canBreak(delayedDestroyBlock.blockPos)) {
             delayedDestroyBlock = null;
         }
 
@@ -306,7 +310,7 @@ public class SpeedMineModule extends Module {
             }
         }
 
-        tryFinalizeRebreak();
+        if (!tryFinalizeDelayedDestroy()) tryFinalizeRebreak();
         sustainDelayedDestroy();
 
         if (hasDelayedDestroy() && delayedDestroyBlock.ticksHeldPickaxe > singleBreakFailTicks.getValue()) {
@@ -428,6 +432,28 @@ public class SpeedMineModule extends Module {
         return false;
     }
 
+    private boolean tryFinalizeDelayedDestroy() {
+        if (delayedDestroyBlock == null) return false;
+        if (delayedDestroyBlock.getBreakProgress() < 1.0) return false;
+        if (!inBreakRange(delayedDestroyBlock.blockPos)) {
+            delayedDestroyBlock.cancelBreaking();
+            delayedDestroyBlock = null;
+            return false;
+        }
+
+        SilentMineBlock completed = delayedDestroyBlock;
+        if (!sendFinishMine(completed)) return false;
+
+        BlockPos completedPos = completed.blockPos;
+        if (rebreakSetBroken.getValue()) {
+            mc.level.setBlockAndUpdate(completedPos, Blocks.AIR.defaultBlockState());
+        }
+        delayedDestroyBlock = null;
+        releaseMineSwapForPlacement();
+        fireFinish(completedPos);
+        return true;
+    }
+
     private void sustainDelayedDestroy() {
         if (!hasDelayedDestroy()) return;
         if (delayedDestroyBlock.ticksHeldPickaxe > singleBreakFailTicks.getValue()) return;
@@ -523,6 +549,20 @@ public class SpeedMineModule extends Module {
 
     public BlockPos getLastDelayedDestroyBlockPos() {
         return lastDelayedDestroyBlockPos;
+    }
+
+    public String getDebugState() {
+        return "rebreak=" + debugMine(rebreakBlock) + ",delayed=" + debugMine(delayedDestroyBlock)
+                + ",canRebreak=" + canRebreakRebreakBlock() + ",failing=" + hasFailingBlock()
+                + ",hold=" + rebreakHoldTicks + ",brokeTick=" + brokeThisTick;
+    }
+
+    private String debugMine(SilentMineBlock mine) {
+        if (mine == null) return "none";
+        return mine.blockPos + "{air=" + mine.beenAir + ",ready=" + mine.isReady()
+                + ",progress=" + String.format(java.util.Locale.ROOT, "%.3f", mine.getBreakProgress())
+                + ",sends=" + mine.timesSendBreakPacket + ",held=" + mine.ticksHeldPickaxe
+                + ",fail=" + mine.isFailing() + "}";
     }
 
     public boolean inBreakRange(BlockPos pos) {

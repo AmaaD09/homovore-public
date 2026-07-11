@@ -33,9 +33,12 @@ import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.Shapes;
 
 import java.awt.Color;
+import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.LinkedList;
+import java.util.List;
+import java.util.Locale;
 import java.util.Queue;
 import java.util.Set;
 
@@ -69,6 +72,7 @@ public class AutoMineModule extends Module {
     private final Setting<Color> glassOutlineColor = color("GlassOutlineColor", 255, 255, 255, 255).setPage("Render")
             .setVisibility(v -> glassRender.getValue());
     private final Setting<Boolean> renderDebugScores = bool("DebugScores", false).setPage("Render");
+    private final Setting<Boolean> debugLog = bool("DebugLog", false).setPage("Extra");
 
     private Player targetPlayer = null;
     private CityBlock target1 = null;
@@ -77,6 +81,7 @@ public class AutoMineModule extends Module {
     private long lastOuterPlaceTime = 0;
 
     private boolean isTerrainFight = false;
+    private String debugDecision = "idle";
 
     private BlockPos glassTargetPos = null;
     private int glassUsedAttempts = 0;
@@ -198,13 +203,24 @@ public class AutoMineModule extends Module {
     private void onPreTick(PreTickEvent event) {
         if (nullCheck()) return;
         update();
+        if (debugLog.getValue()) logDebugState();
     }
 
     private void update() {
+        debugDecision = "scan";
+        targetPlayer = null;
+        target1 = target2 = null;
+        ignorePos = null;
         SpeedMineModule mine = speedMine();
-        if (mine == null) return;
+        if (mine == null) {
+            debugDecision = "speedmine_unavailable";
+            return;
+        }
 
-        if (tryCrawlMine(mine)) return;
+        if (tryCrawlMine(mine)) {
+            debugDecision = "crawl_mine";
+            return;
+        }
 
         BlockState selfFeetBlock = mc.level.getBlockState(mc.player.blockPosition());
         BlockState selfHeadBlock = mc.level.getBlockState(mc.player.blockPosition().above());
@@ -213,33 +229,44 @@ public class AutoMineModule extends Module {
                 && (selfHeadBlock.is(Blocks.OBSIDIAN) || selfHeadBlock.is(Blocks.CRYING_OBSIDIAN));
 
         boolean prioHead = false;
+        boolean headMineAccepted = false;
 
         if (antiSwim.getValue() == AntiSwimMode.Always && shouldBreakSelfHeadBlock) {
-            mine.silentBreakBlock(selfHeadPos, 10);
+            headMineAccepted |= mine.silentBreakBlock(selfHeadPos, 10);
             prioHead = true;
         }
         if (antiSwim.getValue() == AntiSwimMode.MineOrSwim && mc.player.isVisuallyCrawling()
                 && shouldBreakSelfHeadBlock) {
-            mine.silentBreakBlock(selfHeadPos, 30);
+            headMineAccepted |= mine.silentBreakBlock(selfHeadPos, 30);
             prioHead = true;
         }
         if ((antiSwim.getValue() == AntiSwimMode.Mine || antiSwim.getValue() == AntiSwimMode.MineOrSwim)
                 && isBlockBeingBroken(mc.player.blockPosition()) && shouldBreakSelfHeadBlock) {
-            mine.silentBreakBlock(selfHeadPos, 20);
+            headMineAccepted |= mine.silentBreakBlock(selfHeadPos, 20);
             prioHead = true;
         }
 
         targetPlayer = selectTarget();
-        if (targetPlayer == null) return;
+        if (targetPlayer == null) {
+            target1 = target2 = null;
+            debugDecision = "no_target";
+            return;
+        }
+        boolean bedrock = inBedrockCase();
+        isTerrainFight = !bedrock && computeTerrainFight();
 
         handleGlassPush(mine);
 
         if (mine.hasDelayedDestroy() && selfHeadBlock.is(Blocks.OBSIDIAN) && selfFeetBlock.isAir()
                 && selfHeadPos.equals(mine.getRebreakBlockPos())) {
+            debugDecision = "wait_self_head_rebreak";
             return;
         }
 
-        if (prioHead) return;
+        if (prioHead) {
+            debugDecision = "anti_swim_head_request:accepted=" + headMineAccepted;
+            return;
+        }
 
         findTargetBlocks();
 
@@ -249,22 +276,31 @@ public class AutoMineModule extends Module {
         if (!isTargetingFeetBlock && mine.canRebreakRebreakBlock()
                 && ((target1 != null && target1.blockPos.equals(mine.getRebreakBlockPos()))
                 || (target2 != null && target2.blockPos.equals(mine.getRebreakBlockPos())))) {
+            debugDecision = "keep_active_rebreak";
             return;
         }
 
         boolean hasBothInProgress = mine.hasDelayedDestroy() && mine.hasRebreakBlock()
                 && !mine.canRebreakRebreakBlock();
-        if (hasBothInProgress && !mine.hasFailingBlock()) return;
+        if (hasBothInProgress && !mine.hasFailingBlock()) {
+            debugDecision = "two_mines_in_progress";
+            return;
+        }
 
         Queue<BlockPos> targetBlocks = new LinkedList<>();
         if (target1 != null) targetBlocks.add(target1.blockPos);
         if (target2 != null) targetBlocks.add(target2.blockPos);
+        int selectedTargets = targetBlocks.size();
 
         while (!targetBlocks.isEmpty() && mine.alreadyBreaking(targetBlocks.peek())) {
             targetBlocks.remove();
         }
         if (!targetBlocks.isEmpty()) {
-            mine.silentBreakBlock(targetBlocks.remove(), 10);
+            BlockPos requested = targetBlocks.remove();
+            boolean accepted = mine.silentBreakBlock(requested, 10);
+            debugDecision = "mine_request:" + requested + ":accepted=" + accepted;
+        } else {
+            debugDecision = selectedTargets == 0 ? "no_scored_target" : "selected_targets_already_active";
         }
     }
 
@@ -410,6 +446,7 @@ public class AutoMineModule extends Module {
                 bestBlock.score = score;
                 bestBlock.blockPos = pos.blockPos;
                 bestBlock.isFeetBlock = isBlockInFeet(pos.blockPos);
+                bestBlock.type = pos.type;
                 set = true;
             }
         }
@@ -743,6 +780,75 @@ public class AutoMineModule extends Module {
         };
     }
 
+    private void logDebugState() {
+        SpeedMineModule mine = speedMine();
+        if (targetPlayer == null) {
+            Homovore.LOGGER.info(
+                    "[AutoMine] tick={} decision={} target=none mine={} enemyBreaks={} glass[target={} attempts={}]",
+                    mc.player.tickCount, debugDecision, mine == null ? "disabled" : mine.getDebugState(),
+                    enemyBreaking.size(), glassTargetPos, glassUsedAttempts);
+            return;
+        }
+
+        PhaseSnapshot phase = phaseSnapshot(targetPlayer);
+        Vec3 pos = targetPlayer.position();
+        Vec3 velocity = targetPlayer.getDeltaMovement();
+        CityBlock extend = target1 != null && target1.type == CheckPosType.Extend
+                ? target1
+                : target2 != null && target2.type == CheckPosType.Extend ? target2 : null;
+        Homovore.LOGGER.info(
+                "[AutoMine] tick={} decision={} target={} pose={} pos=({},{},{}) vel=({},{},{}) speed={} "
+                        + "flags[ground={},crawl={},swim={},sneak={},elytra={}] phase={} phasedCells={} cells={} "
+                        + "mode[bedrock={},terrain={},priority={},extend={}] selected[first={},second={},extendTarget={}] "
+                        + "mine={} glass[target={} attempts={} items={}] enemyBreaks={}",
+                mc.player.tickCount, debugDecision, targetPlayer.getName().getString(), targetPlayer.getPose(),
+                format(pos.x), format(pos.y), format(pos.z),
+                format(velocity.x), format(velocity.y), format(velocity.z), format(velocity.length()),
+                targetPlayer.onGround(), targetPlayer.isVisuallyCrawling(), targetPlayer.isSwimming(),
+                targetPlayer.isCrouching(), targetPlayer.isFallFlying(), !phase.cells.isEmpty(),
+                phase.cells.size(), phase.cells, inBedrockCase(), isTerrainFight,
+                targetPriority.getValue(), extendBreakMode.getValue(), describeTarget(target1),
+                describeTarget(target2), describeTarget(extend), mine == null ? "disabled" : mine.getDebugState(),
+                glassTargetPos, glassUsedAttempts, glassTargetPos == null ? 0 : countItems(glassTargetPos),
+                enemyBreaking.size());
+    }
+
+    private PhaseSnapshot phaseSnapshot(Player player) {
+        AABB box = player.getBoundingBox().deflate(1.0E-4);
+        List<BlockPos> cells = new ArrayList<>();
+        for (BlockPos raw : BlockPos.betweenClosed(
+                Mth.floor(box.minX), Mth.floor(box.minY), Mth.floor(box.minZ),
+                Mth.floor(box.maxX), Mth.floor(box.maxY), Mth.floor(box.maxZ))) {
+            BlockPos blockPos = raw.immutable();
+            BlockState state = mc.level.getBlockState(blockPos);
+            if (state.getCollisionShape(mc.level, blockPos).toAabbs().stream()
+                    .map(shape -> shape.move(blockPos.getX(), blockPos.getY(), blockPos.getZ()))
+                    .anyMatch(shape -> shape.intersects(box))) {
+                cells.add(blockPos);
+            }
+        }
+        return new PhaseSnapshot(cells);
+    }
+
+    private int countItems(BlockPos airPos) {
+        int count = 0;
+        AABB box = new AABB(airPos).expandTowards(0, 1, 0);
+        for (Entity entity : mc.level.getEntities((Entity) null, box)) {
+            if (entity instanceof ItemEntity) count++;
+        }
+        return count;
+    }
+
+    private static String describeTarget(CityBlock target) {
+        if (target == null) return "none";
+        return target.blockPos + "/" + target.type + "/score=" + format(target.score)
+                + "/feet=" + target.isFeetBlock;
+    }
+
+    private static String format(double value) {
+        return String.format(Locale.ROOT, "%.3f", value);
+    }
+
     @Override
     public String getDisplayInfo() {
         return targetPlayer != null ? targetPlayer.getName().getString() : null;
@@ -752,7 +858,10 @@ public class AutoMineModule extends Module {
         BlockPos blockPos;
         double score;
         boolean isFeetBlock = false;
+        CheckPosType type;
     }
+
+    private record PhaseSnapshot(List<BlockPos> cells) {}
 
     private static final class CheckPos {
         final BlockPos blockPos;
