@@ -24,7 +24,6 @@ import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongIterator;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundEntityEventPacket;
-import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
 import net.minecraft.network.protocol.game.ClientboundExplodePacket;
 import net.minecraft.network.protocol.game.ServerboundInteractPacket;
 import net.minecraft.network.protocol.game.ServerboundSwingPacket;
@@ -35,7 +34,6 @@ import net.minecraft.world.InteractionHand;
 import net.minecraft.util.Mth;
 import net.minecraft.world.damagesource.CombatRules;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.boss.enderdragon.EndCrystal;
@@ -116,6 +114,8 @@ public class AutoCrystalModule extends Module {
     private static final boolean NO_SELF_POP    = true;
 
     private static final long PLACE_PENDING_MS = 40;
+    private static final long REACTIVE_REPLACE_WINDOW_NS = 500_000_000L;
+    private static final long INSTANT_ATTACK_SUPPRESS_NS = 75_000_000L;
 
     private static final long CRYSTAL_TRACK_MS = 1750;
 
@@ -134,18 +134,21 @@ public class AutoCrystalModule extends Module {
     private long diagLifetimeSends = 0L;
     private long diagLastTickSends = 0L;
     private int  diagPeakTickSends = 0;
-    private int  diagPlaceAttempt, diagPlaceSent, diagBreakSent, diagInstaBreak;
+    private int  diagPlaceAttempt, diagPlaceSent, diagBreakSent, diagCrystalSpawn, diagInstaBreak, diagReactivePlace;
 
     private double lastCalcMs = 0;
 
     private int lastReactorPlaceTick = -1;
-    private BlockPos lastPlaceAir = null;
+    private volatile BlockPos lastPlaceAir = null;
+    private volatile PlaceTarget lastPlaceTarget = null;
+    private volatile long lastPlaceSentNanos = 0L;
 
     private final ExposureContext exposureCtx = new ExposureContext();
 
     private final ArrayList<PlaceCandidate> candidates = new ArrayList<>();
 
     private final Set<Integer> deadIds = ConcurrentHashMap.newKeySet();
+    private final ConcurrentHashMap<Integer, Long> instantAttacks = new ConcurrentHashMap<>();
 
     private final Set<BlockPos> seeThrough = new HashSet<>();
 
@@ -169,12 +172,16 @@ public class AutoCrystalModule extends Module {
     public void onEnable() {
         crystalPlaces.clear();
         deadIds.clear();
+        instantAttacks.clear();
         placeTimer.reset();
         breakTimer.reset();
         lastBestDamage = 0;
         lastCalcMs = 0;
         lastReactorPlaceTick = -1;
         pendingSwapHandle = null;
+        lastPlaceAir = null;
+        lastPlaceTarget = null;
+        lastPlaceSentNanos = 0L;
         resetDiag();
         Homovore.placementManager.addListener(placementListener);
     }
@@ -188,8 +195,11 @@ public class AutoCrystalModule extends Module {
         }
         crystalPlaces.clear();
         deadIds.clear();
+        instantAttacks.clear();
         lastBestDamage = 0;
         lastPlaceAir = null;
+        lastPlaceTarget = null;
+        lastPlaceSentNanos = 0L;
         resetDiag();
         renderPos = null;
         smoothBox = null;
@@ -312,9 +322,6 @@ public class AutoCrystalModule extends Module {
             return;
         }
 
-        if (event.getPacket() instanceof ClientboundAddEntityPacket pkt) {
-            onCrystalSpawn(pkt);
-        }
     }
 
     @Subscribe
@@ -343,13 +350,14 @@ public class AutoCrystalModule extends Module {
                 .sorted((a, b) -> Integer.compare(b.getValue()[0], a.getValue()[0]))
                 .forEach(e -> breakdown.append(e.getKey()).append('=').append(e.getValue()[0]).append(' '));
         Homovore.LOGGER.info(
-                "[ACDiag] {}ms sends={} peakTick={} peakSec={} | place att/sent={}/{} break={} insta={} | {}",
+                "[ACDiag] {}ms sends={} peakTick={} peakSec={} | place att/sent={}/{} break={} spawn={} insta={} reactive={} | {}",
                 now - diagWindowStart, diagWindowSends, diagPeakTickSends, diagPeakWindow,
-                diagPlaceAttempt, diagPlaceSent, diagBreakSent, diagInstaBreak, breakdown.toString().trim());
+                diagPlaceAttempt, diagPlaceSent, diagBreakSent, diagCrystalSpawn, diagInstaBreak, diagReactivePlace,
+                breakdown.toString().trim());
         diagSendCounts.clear();
         diagWindowSends = 0;
         diagPeakTickSends = 0;
-        diagPlaceAttempt = diagPlaceSent = diagBreakSent = diagInstaBreak = 0;
+        diagPlaceAttempt = diagPlaceSent = diagBreakSent = diagCrystalSpawn = diagInstaBreak = diagReactivePlace = 0;
         diagWindowStart = now;
     }
 
@@ -361,13 +369,12 @@ public class AutoCrystalModule extends Module {
         diagLifetimeSends = 0L;
         diagLastTickSends = 0L;
         diagPeakTickSends = 0;
-        diagPlaceAttempt = diagPlaceSent = diagBreakSent = diagInstaBreak = 0;
+        diagPlaceAttempt = diagPlaceSent = diagBreakSent = diagCrystalSpawn = diagInstaBreak = diagReactivePlace = 0;
     }
 
-    private void onCrystalSpawn(ClientboundAddEntityPacket pkt) {
-
+    public void onCrystalAdded(EndCrystal crystal) {
+        diagCrystalSpawn++;
         if (!doBreak.getValue() || breakDelay.getValue() != 0) return;
-        if (pkt.getType() != EntityType.END_CRYSTAL) return;
         if (nullCheck() || mc.player.isDeadOrDying()) return;
 
         OffhandModule offhand = Homovore.moduleManager.getModuleByClass(OffhandModule.class);
@@ -376,10 +383,6 @@ public class AutoCrystalModule extends Module {
                 && mc.player.getUsedItemHand() == InteractionHand.MAIN_HAND) return;
         AutoSwordModule sword = Homovore.moduleManager.getModuleByClass(AutoSwordModule.class);
         if (sword != null && sword.isEnabled() && sword.isMaceAttackReady()) return;
-
-        EndCrystal crystal = new EndCrystal(EntityType.END_CRYSTAL, mc.level);
-        crystal.setPos(pkt.getX(), pkt.getY(), pkt.getZ());
-        crystal.setId(pkt.getId());
 
         AABB bb = crystal.getBoundingBox();
         Vec3 reachEye = bestReachEye(bb);
@@ -391,14 +394,36 @@ public class AutoCrystalModule extends Module {
         if (optimisticSelf > maxSelfDamage.getValue()
                 || (NO_SELF_POP && optimisticSelf + 1.5f >= playerHealth)) return;
 
-        float serverYaw = Homovore.rotationManager.getServerYaw();
-        float serverPitch = Homovore.rotationManager.getServerPitch();
-        if (!canBreakCrystal(crystal, serverYaw, serverPitch)) return;
+        Vec3 hit = getClosestPointToEye(reachEye, bb);
+        float[] angles = MathUtil.calcAngle(reachEye, hit);
+        if (!canBreakCrystal(crystal, angles[0], angles[1])) return;
+
+        if (!Homovore.rotationManager.submit(new RotationRequest(
+                "AutoCrystal_instant", 61, angles[0], angles[1], RotationRequest.Mode.SILENT))) return;
 
         diagInstaBreak++;
+        instantAttacks.put(crystal.getId(), System.nanoTime());
         mc.player.connection.send(
                 ServerboundInteractPacket.createAttackPacket(crystal, mc.player.isShiftKeyDown()));
         mc.player.connection.send(new ServerboundSwingPacket(InteractionHand.MAIN_HAND));
+
+        tryReactiveReplace(crystal.blockPosition());
+    }
+
+    private void tryReactiveReplace(BlockPos airPos) {
+        if (!place.getValue()) return;
+
+        PlaceTarget target = lastPlaceTarget;
+        long sentNanos = lastPlaceSentNanos;
+        long nowNanos = System.nanoTime();
+        if (target == null || !target.base.above().equals(airPos)) return;
+        if (nowNanos - sentNanos > REACTIVE_REPLACE_WINDOW_NS) return;
+        if (!placeTimer.passedMs(placeDelay.getValue())) return;
+        if (!isDesirablePlacement(airPos)) return;
+        if (doPlace(target, false, true)) {
+            diagReactivePlace++;
+            placeTimer.reset();
+        }
     }
 
     private void onBlockUpdate(BlockPos pos, boolean nowAir) {
@@ -424,8 +449,7 @@ public class AutoCrystalModule extends Module {
 
         if (doBreak.getValue() && breakTimer.passedMs(breakDelay.getValue())) {
             EndCrystal target = findBestCrystal(potentialTargets);
-            if (target != null) {
-                breakCrystal(target);
+            if (target != null && breakCrystal(target)) {
                 breakTimer.reset();
                 return;
             }
@@ -437,8 +461,7 @@ public class AutoCrystalModule extends Module {
         lastReactorPlaceTick = mc.player.tickCount;
 
         PlaceTarget placeTarget = findBestPlace(potentialTargets);
-        if (placeTarget != null) {
-            doPlace(placeTarget);
+        if (placeTarget != null && doPlace(placeTarget)) {
             placeTimer.reset();
         }
     }
@@ -487,8 +510,7 @@ public class AutoCrystalModule extends Module {
             TargetsModule breakTargets = Homovore.moduleManager.getModuleByClass(TargetsModule.class);
             List<TargetCache> breakTargetCache = collectTargets(breakTargets, BREAK_RANGE + 12.0);
             EndCrystal target = findBestCrystal(breakTargetCache);
-            if (target != null) {
-                breakCrystal(target);
+            if (target != null && breakCrystal(target)) {
                 breakTimer.reset();
                 broke = true;
             }
@@ -496,8 +518,7 @@ public class AutoCrystalModule extends Module {
 
         if (!broke && antiChineseReady && breakTimer.passedMs(breakDelay.getValue())) {
             EndCrystal acTarget = findAntiChineseCrystal();
-            if (acTarget != null) {
-                breakCrystal(acTarget);
+            if (acTarget != null && breakCrystal(acTarget)) {
                 breakTimer.reset();
             }
         }
@@ -530,22 +551,19 @@ public class AutoCrystalModule extends Module {
             boolean baseQueued = doBasePlace(baseTarget);
             if (baseQueued) {
                 Homovore.placementManager.flushQueue();
-                if (canPlace) {
-                    doPlace(new PlaceTarget(baseTarget.base, baseTarget.damage), true);
+                if (canPlace && doPlace(new PlaceTarget(baseTarget.base, baseTarget.damage), true)) {
                     placeTimer.reset();
                     placed = true;
                 }
             }
-        } else if (crystalTarget != null) {
-            doPlace(crystalTarget);
+        } else if (crystalTarget != null && doPlace(crystalTarget)) {
             placeTimer.reset();
             placed = true;
         }
 
         if (!placed && antiChineseReady && canPlace) {
             PlaceTarget acPlace = findAntiChinesePlace();
-            if (acPlace != null) {
-                doPlace(acPlace);
+            if (acPlace != null && doPlace(acPlace)) {
                 placeTimer.reset();
             }
         }
@@ -679,6 +697,9 @@ public class AutoCrystalModule extends Module {
         AABB searchArea = mc.player.getBoundingBox().inflate(BREAK_RANGE + 2);
         for (Entity e : mc.level.getEntities(null, searchArea)) {
             if (!(e instanceof EndCrystal crystal)) continue;
+            Long instantAttack = instantAttacks.get(crystal.getId());
+            if (instantAttack != null
+                    && System.nanoTime() - instantAttack <= INSTANT_ATTACK_SUPPRESS_NS) continue;
 
             AABB bb = crystal.getBoundingBox();
             Vec3 reachEye = bestReachEye(bb);
@@ -705,16 +726,17 @@ public class AutoCrystalModule extends Module {
         return best;
     }
 
-    private void breakCrystal(EndCrystal crystal) {
+    private boolean breakCrystal(EndCrystal crystal) {
         Vec3 eyePos = mc.player.getEyePosition(1.0f);
         Vec3 hit = getClosestPointToEye(eyePos, crystal.getBoundingBox());
         float[] angles = MathUtil.calcAngle(eyePos, hit);
-        if (!canBreakCrystal(crystal, angles[0], angles[1])) return;
-        Homovore.rotationManager.submit(new RotationRequest(
+        if (!canBreakCrystal(crystal, angles[0], angles[1])) return false;
+        if (!Homovore.rotationManager.submit(new RotationRequest(
             "AutoCrystal_break", 60, angles[0], angles[1], RotationRequest.Mode.SILENT
-        ));
+        ))) return false;
         diagBreakSent++;
         mc.gameMode.attack(mc.player, crystal);
+        return true;
     }
 
     private boolean canBreakCrystal(EndCrystal crystal, float yaw, float pitch) {
@@ -1041,15 +1063,19 @@ public class AutoCrystalModule extends Module {
         return false;
     }
 
-    private void doPlace(PlaceTarget target) {
-        doPlace(target, false);
+    private boolean doPlace(PlaceTarget target) {
+        return doPlace(target, false, false);
     }
 
-    private void doPlace(PlaceTarget target, boolean trustBase) {
+    private boolean doPlace(PlaceTarget target, boolean trustBase) {
+        return doPlace(target, trustBase, false);
+    }
+
+    private boolean doPlace(PlaceTarget target, boolean trustBase, boolean reactive) {
         Result result = InventoryUtil.find(Items.END_CRYSTAL, EnumSet.of(ResultType.HOTBAR));
         if (!result.found()) {
             lastBestDamage = 0;
-            return;
+            return false;
         }
         lastBestDamage = target.damage;
 
@@ -1058,12 +1084,14 @@ public class AutoCrystalModule extends Module {
 
         if (offhandPlace.getValue()) {
             diagPlaceAttempt++;
-            boolean sentOffhand = Homovore.placementManager.placeCrystalOffhand(base, slot, trustBase);
+            boolean sentOffhand = reactive
+                    ? Homovore.placementManager.placeCrystalOffhandReactive(base, slot, trustBase)
+                    : Homovore.placementManager.placeCrystalOffhandAutoCrystal(base, slot, trustBase);
             if (sentOffhand) {
                 diagPlaceSent++;
-                recordPlace(base.above());
+                recordPlace(target);
             }
-            return;
+            return sentOffhand;
         }
 
         int originalSlot     = Homovore.swapManager.serverSlot();
@@ -1077,7 +1105,7 @@ public class AutoCrystalModule extends Module {
         if (slot != originalSlot && handle == null) {
             handle = Homovore.swapManager.acquire("AutoCrystal", 68);
             if (handle == null) {
-                return;
+                return false;
             }
             acquiredNow = true;
         }
@@ -1087,18 +1115,22 @@ public class AutoCrystalModule extends Module {
 
         if (sent) {
             diagPlaceSent++;
-            recordPlace(base.above());
+            recordPlace(target);
             if (handle != null) pendingSwapHandle = handle;
         } else if (acquiredNow) {
 
             Homovore.swapManager.release(handle);
         }
+        return sent;
     }
 
-    private void recordPlace(BlockPos airPos) {
+    private void recordPlace(PlaceTarget target) {
+        BlockPos airPos = target.base.above();
         crystalPlaces.put(airPos.asLong(), System.currentTimeMillis());
         markRender(airPos);
         lastPlaceAir = airPos;
+        lastPlaceSentNanos = System.nanoTime();
+        lastPlaceTarget = target;
     }
 
     private boolean hasLiveCrystalAt(BlockPos airPos) {
@@ -1120,8 +1152,7 @@ public class AutoCrystalModule extends Module {
         long pendingTs = crystalPlaces.get(airPos.asLong());
         if (pendingTs != 0L && now - pendingTs < PLACE_PENDING_MS) return false;
 
-        doPlace(new PlaceTarget(base, 0f), false);
-        return crystalPlaces.get(airPos.asLong()) != pendingTs;
+        return doPlace(new PlaceTarget(base, 0f), false);
     }
 
     public boolean isDesirablePlacement(BlockPos airPos) {
@@ -1169,6 +1200,9 @@ public class AutoCrystalModule extends Module {
             long key = it.nextLong();
             if (now - crystalPlaces.get(key) > CRYSTAL_TRACK_MS) it.remove();
         }
+        long nowNanos = System.nanoTime();
+        instantAttacks.entrySet().removeIf(
+                entry -> nowNanos - entry.getValue() > INSTANT_ATTACK_SUPPRESS_NS);
 
         if (mc.player != null && mc.player.tickCount % 100 == 0) {
             deadIds.clear();

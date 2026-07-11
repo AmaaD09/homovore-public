@@ -51,20 +51,21 @@ public class RotationManager {
         EVENT_BUS.register(this);
     }
 
-    public void submit(RotationRequest request) {
+    public boolean submit(RotationRequest request) {
         if (request.mode == RotationRequest.Mode.SILENT) {
-            if (silentSentThisTick && request.priority <= silentSentPriority) return;
+            if (silentSentThisTick && request.priority <= silentSentPriority) return false;
             performSilent(request);
             silentSentThisTick = true;
             silentSentPriority = request.priority;
             silentSyncRequired = true;
             lastSilentMs = System.currentTimeMillis();
-            return;
+            return true;
         }
 
         requests.removeIf(r -> r.id.equals(request.id));
         requests.add(request);
         requests.sort(Comparator.comparingInt((RotationRequest r) -> r.priority).reversed());
+        return true;
     }
 
     public void cancel(String id) {

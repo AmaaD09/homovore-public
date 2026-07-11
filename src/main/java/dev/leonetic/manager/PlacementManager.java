@@ -76,6 +76,12 @@ public class PlacementManager extends Feature {
     private boolean wasUsingItem = false;
 
     private int lastSwapSequenceTick = -1;
+    private SwapSequenceOwner lastSwapSequenceOwner = SwapSequenceOwner.OTHER;
+
+    private enum SwapSequenceOwner {
+        OTHER,
+        AUTO_CRYSTAL
+    }
 
     private boolean swapSequenceAvailable() {
         return mc.player == null || mc.player.tickCount != lastSwapSequenceTick;
@@ -106,8 +112,15 @@ public class PlacementManager extends Feature {
         InventoryUtil.click(slot, hotbarSlot, ClickType.SWAP);
     }
 
-    private void markSwapSequenceUsed() {
-        if (mc.player != null) lastSwapSequenceTick = mc.player.tickCount;
+    private boolean reactiveCrystalSequenceAvailable() {
+        return swapSequenceAvailable() || lastSwapSequenceOwner == SwapSequenceOwner.AUTO_CRYSTAL;
+    }
+
+    private void markSwapSequenceUsed(SwapSequenceOwner owner) {
+        if (mc.player != null) {
+            lastSwapSequenceTick = mc.player.tickCount;
+            lastSwapSequenceOwner = owner;
+        }
     }
 
     public interface PlacementListener {
@@ -241,7 +254,7 @@ public class PlacementManager extends Feature {
             placing = false;
         }
         if (!sent) return;
-        markSwapSequenceUsed();
+        markSwapSequenceUsed(SwapSequenceOwner.OTHER);
 
         long stamp = System.currentTimeMillis();
         for (PreparedClick p : ready) {
@@ -296,7 +309,7 @@ public class PlacementManager extends Feature {
             placing = false;
         }
         if (!sent) return List.of();
-        markSwapSequenceUsed();
+        markSwapSequenceUsed(SwapSequenceOwner.OTHER);
 
         long stamp = System.currentTimeMillis();
         List<BlockPos> placed = new ArrayList<>(ready.size());
@@ -640,16 +653,33 @@ public class PlacementManager extends Feature {
             altSwapOut(hotbarSlot, useSlot);
         }
 
-        if (altSwap) markSwapSequenceUsed();
+        if (altSwap) markSwapSequenceUsed(SwapSequenceOwner.OTHER);
         return true;
     }
 
     public boolean placeCrystalOffhand(BlockPos base, int hotbarSlot, boolean trustBase) {
+        return placeCrystalOffhand(base, hotbarSlot, trustBase, false, SwapSequenceOwner.OTHER);
+    }
+
+    public boolean placeCrystalOffhandAutoCrystal(BlockPos base, int hotbarSlot, boolean trustBase) {
+        return placeCrystalOffhand(base, hotbarSlot, trustBase, false, SwapSequenceOwner.AUTO_CRYSTAL);
+    }
+
+    public boolean placeCrystalOffhandReactive(BlockPos base, int hotbarSlot, boolean trustBase) {
+        return placeCrystalOffhand(base, hotbarSlot, trustBase, true, SwapSequenceOwner.AUTO_CRYSTAL);
+    }
+
+    private boolean placeCrystalOffhand(BlockPos base, int hotbarSlot, boolean trustBase, boolean reactive,
+                                        SwapSequenceOwner owner) {
         OffhandModule offhand = Homovore.moduleManager.getModuleByClass(OffhandModule.class);
         if (offhand != null && offhand.shouldDeferForEat()) return false;
 
-        if (hasPending()) flushQueue();
-        if (!swapSequenceAvailable()) return false;
+        if (!reactive) {
+            if (hasPending()) flushQueue();
+            if (!swapSequenceAvailable()) return false;
+        } else if (!reactiveCrystalSequenceAvailable()) {
+            return false;
+        }
 
         BlockHitResult hit = computeCrystalHit(base, trustBase);
         if (hit == null) return false;
@@ -681,7 +711,7 @@ public class PlacementManager extends Feature {
         } finally {
             altSwapOut(hotbarSlot, useSlot);
         }
-        markSwapSequenceUsed();
+        markSwapSequenceUsed(owner);
 
         return true;
     }
@@ -748,7 +778,7 @@ public class PlacementManager extends Feature {
             InventoryUtil.swapToOffhand(crystalSlot);
         }
 
-        markSwapSequenceUsed();
+        markSwapSequenceUsed(SwapSequenceOwner.OTHER);
         return true;
     }
 

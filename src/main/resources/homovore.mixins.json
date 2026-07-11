@@ -22,6 +22,7 @@
     "entity.FireworkRocketEntityAccessor",
     "entity.LivingEntityEffectParticlesAccessor",
     "entity.MixinAvatarRenderer",
+    "entity.MixinClientLevelEntity",
     "entity.MixinClientPlayerEntity",
     "entity.MixinEntity",
     "entity.MixinEntityRenderer",

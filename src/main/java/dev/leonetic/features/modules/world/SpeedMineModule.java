@@ -43,7 +43,7 @@ public class SpeedMineModule extends Module {
 
     private static final double USER_PRIORITY = 100.0;
 
-    private static final int MINE_SWAP_PRIORITY = 65;
+    private static final int MINE_SWAP_PRIORITY = 75;
 
     private SilentMineBlock rebreakBlock;
     private SilentMineBlock delayedDestroyBlock;
