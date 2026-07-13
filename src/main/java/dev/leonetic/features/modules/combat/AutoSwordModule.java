@@ -223,7 +223,9 @@ public class AutoSwordModule extends Module {
         if (mc.player.onClimbable() || mc.player.isPassenger()) return false;
         if (mc.player.hasEffect(MobEffects.LEVITATION)) return false;
 
-        if (critsWithSword.getValue() && !weaponStack.is(ItemTags.SWORDS)) return false;
+        if (critsWithSword.getValue()
+                && !weaponStack.is(ItemTags.SWORDS)
+                && !weaponStack.is(ItemTags.AXES)) return false;
 
         if (strict.getValue() && !isPlayerPhasedIntoBlock()) return false;
         return true;
@@ -317,8 +319,6 @@ public class AutoSwordModule extends Module {
                     }
                 }
             }
-
-            if (isSword) attackDamage += 5f;
 
             attackDamage += EnchantmentUtil.getLevel(Enchantments.SHARPNESS, held) * 1.25f;
             attackDamage += EnchantmentUtil.getLevel(Enchantments.SMITE, held) * 2.5f;
