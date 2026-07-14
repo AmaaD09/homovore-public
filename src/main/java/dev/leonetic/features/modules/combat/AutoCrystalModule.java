@@ -2,19 +2,25 @@ package dev.leonetic.features.modules.combat;
 
 import dev.leonetic.Homovore;
 import dev.leonetic.event.impl.entity.player.PreTickEvent;
+import dev.leonetic.event.impl.input.KeyInputEvent;
 import dev.leonetic.event.impl.network.PacketEvent;
+import dev.leonetic.event.impl.render.Render2DEvent;
 import dev.leonetic.event.impl.render.Render3DEvent;
 import dev.leonetic.event.system.Subscribe;
 import dev.leonetic.features.modules.Module;
 import dev.leonetic.features.modules.client.TargetsModule;
 import dev.leonetic.features.modules.world.SpeedMineModule;
+import dev.leonetic.features.settings.Bind;
 import dev.leonetic.features.settings.Setting;
+import net.minecraft.ChatFormatting;
 import dev.leonetic.manager.PlacementManager;
 import dev.leonetic.manager.RotationRequest;
 import dev.leonetic.manager.SwapManager;
 import dev.leonetic.util.MathUtil;
 import dev.leonetic.util.PlaceUtil;
+import dev.leonetic.util.render.MatrixCapture;
 import dev.leonetic.util.render.RenderUtil;
+import net.minecraft.client.gui.GuiGraphics;
 import dev.leonetic.util.inventory.InventoryUtil;
 import dev.leonetic.util.inventory.Result;
 import dev.leonetic.util.inventory.ResultType;
@@ -74,8 +80,9 @@ public class AutoCrystalModule extends Module {
     private final Setting<Integer> breakDelay    = num("BreakDelay", 0, 0, 2000).setPage("General");
     private final Setting<Double>  minDamage     = num("MinDamage", 4.0, 0.0, 36.0).setPage("General");
     private final Setting<Double>  maxSelfDamage = num("MaxSelfDamage", 4.0, 0.0, 36.0).setPage("General");
-    private final Setting<Boolean> slowPlace     = bool("SlowPlace", false).setPage("General");
-    private final Setting<Double>  slowPlaceThreshold = num("SlowPlaceThreshold", 3.0, 0.0, 36.0).setPage("General");
+    private final Setting<FacePlaceMode> facePlace = mode("FacePlace", FacePlaceMode.NORMAL).setPage("General");
+    private final Setting<Double>  facePlaceThreshold = num("FacePlaceThreshold", 3.0, 0.0, 36.0).setPage("General");
+    private final Setting<Bind>    facePlaceBind = key("FacePlaceBind", Bind.none()).setPage("General");
     private final Setting<Boolean> antiSurround  = bool("AntiSurround", true).setPage("General");
     private final Setting<Integer> antiSurroundCompletion = num("AntiSurroundCompletion", 70, 0, 100).setPage("General");
 
@@ -96,16 +103,24 @@ public class AutoCrystalModule extends Module {
     private final Setting<Float>   lineWidth     = num("LineWidth", 1.5f, 0.5f, 5.0f).setPage("Render");
     private final Setting<Double>  gradientHeight = num("GradientHeight", 0.7, 0.0, 1.0).setPage("Render");
     private final Setting<Integer> renderTime    = num("RenderTime", 10, 1, 40).setPage("Render");
+    private final Setting<Boolean> keepRender    = bool("KeepRender", true).setPage("Render");
     private final Setting<Integer> smoothness    = num("Smoothness", 10, 1, 50).setPage("Render");
     private final Setting<Color>   pulseColor    = color("PulseColor", 130, 80, 255, 150).setPage("Render");
     private final Setting<Double>  pulseSpeed    = num("PulseSpeed", 2.0, 0.2, 6.0).setPage("Render");
     private final Setting<Double>  pulseExpand   = num("PulseExpand", 0.35, 0.0, 1.0).setPage("Render");
+    private final Setting<Boolean> damageText    = bool("DamageText", true).setPage("Render");
+    private final Setting<Color>   damageTextColor = color("DamageTextColor", 255, 255, 255, 255).setPage("Render");
+    private final Setting<Float>   damageTextScale = num("DamageTextScale", 1.0f, 0.3f, 3.0f).setPage("Render");
+    private final Setting<Boolean> damageTextShadow = bool("DamageTextShadow", true).setPage("Render");
 
     private BlockPos renderPos = null;
+    private float    renderDamage = 0f;
     private long     renderStartMs = 0L;
     private AABB     smoothBox = null;
 
     private enum RenderMode { NONE, GRADIENT, GRADIENT_SMOOTH, BOX_SMOOTH, PULSE }
+
+    private enum FacePlaceMode { SLOW, NORMAL, FORCE }
 
     private static final double  PLACE_RANGE    = 6.0;
     private static final double  BASE_PLACE_RANGE = 6.0;
@@ -165,8 +180,12 @@ public class AutoCrystalModule extends Module {
 
     public AutoCrystalModule() {
         super("AutoCrystal", "Automatically places and breaks end crystals.", Category.COMBAT);
+        renderTime.setVisibility(v -> !keepRender.getValue());
+        damageTextColor.setVisibility(v -> damageText.getValue());
+        damageTextScale.setVisibility(v -> damageText.getValue());
+        damageTextShadow.setVisibility(v -> damageText.getValue());
         placeDelay.setVisibility(v -> place.getValue());
-        slowPlaceThreshold.setVisibility(v -> slowPlace.getValue());
+        facePlaceThreshold.setVisibility(v -> facePlace.getValue() == FacePlaceMode.SLOW);
         breakDelay.setVisibility(v -> doBreak.getValue());
         basePlaceTargetRange.setVisibility(v -> basePlace.getValue());
         basePlaceMinDamage.setVisibility(v -> basePlace.getValue());
@@ -209,13 +228,49 @@ public class AutoCrystalModule extends Module {
         lastPlaceSentNanos = 0L;
         resetDiag();
         renderPos = null;
+        renderDamage = 0f;
         smoothBox = null;
     }
 
-    private void markRender(BlockPos crystalPos) {
-        if (renderMode.getValue() == RenderMode.NONE) return;
+    private void markRender(BlockPos crystalPos, float damage) {
+        if (renderMode.getValue() == RenderMode.NONE && !damageText.getValue()) return;
         renderPos = crystalPos;
+        renderDamage = damage;
         renderStartMs = System.currentTimeMillis();
+    }
+
+    private boolean isRenderExpired() {
+        if (keepRender.getValue()) return false;
+        return System.currentTimeMillis() - renderStartMs > renderTime.getValue() * 50L;
+    }
+
+    @Override
+    public void onRender2D(Render2DEvent event) {
+        if (nullCheck() || !damageText.getValue() || renderPos == null || renderDamage <= 0f) return;
+
+        if (isRenderExpired()) {
+            if (renderMode.getValue() == RenderMode.NONE) {
+                renderPos = null;
+                smoothBox = null;
+            }
+            return;
+        }
+
+        float[] screen = MatrixCapture.worldToScreen(
+                renderPos.getX() + 0.5, renderPos.getY() + 1.2, renderPos.getZ() + 0.5);
+        if (screen == null) return;
+
+        String text = String.format("%.1f", renderDamage);
+        GuiGraphics graphics = event.getContext();
+        float textScale = damageTextScale.getValue();
+        int halfWidth = mc.font.width(text) / 2;
+
+        graphics.pose().pushMatrix();
+        graphics.pose().translate(screen[0], screen[1]);
+        graphics.pose().scale(textScale, textScale);
+        graphics.drawString(mc.font, text, -halfWidth, -mc.font.lineHeight,
+                damageTextColor.getValue().getRGB(), damageTextShadow.getValue());
+        graphics.pose().popMatrix();
     }
 
     @Override
@@ -224,7 +279,7 @@ public class AutoCrystalModule extends Module {
 
         long elapsed = System.currentTimeMillis() - renderStartMs;
         long life = renderTime.getValue() * 50L;
-        if (elapsed > life) {
+        if (isRenderExpired()) {
             renderPos = null;
             smoothBox = null;
             return;
@@ -297,7 +352,9 @@ public class AutoCrystalModule extends Module {
     }
 
     private void drawPulse(Render3DEvent event, long elapsed, long life) {
-        double fade = 1.0 - (double) elapsed / life;
+        double fade = keepRender.getValue()
+                ? 1.0
+                : 1.0 - (double) elapsed / life;
         double phase = elapsed / 1000.0 * pulseSpeed.getValue();
         double pulse = (Math.sin(phase * Math.PI * 2.0) + 1.0) * 0.5;
         double grow = pulse * pulseExpand.getValue();
@@ -640,7 +697,7 @@ public class AutoCrystalModule extends Module {
                         TargetCache tc = potentialTargets.get(i);
                         if (tc.pos.distanceToSqr(crystalCenter) > 144.0) continue;
                         float dmg = maxDamage(tc, crystalCenter);
-                        if (dmg < getDynamicMin(tc.hp, tc.abs, tc.armorBroken)) continue;
+                        if (!damageAccepted(tc, dmg)) continue;
                         bound += dmg;
                         anyBound = true;
                     }
@@ -654,7 +711,7 @@ public class AutoCrystalModule extends Module {
                         TargetCache tc = potentialTargets.get(i);
                         if (tc.pos.distanceToSqr(crystalCenter) > 144.0) continue;
                         float dmg = calcDamage(tc, crystalCenter, basePos);
-                        if (dmg < getDynamicMin(tc.hp, tc.abs, tc.armorBroken)) continue;
+                        if (!damageAccepted(tc, dmg)) continue;
                         totalDmg += dmg;
                         anyTarget = true;
                     }
@@ -728,7 +785,7 @@ public class AutoCrystalModule extends Module {
             for (TargetCache tc : potentialTargets) {
                 if (tc.pos.distanceToSqr(cp) > 144.0) continue;
                 float dmg = calcDamage(tc, cp);
-                if (dmg < getDynamicMin(tc.hp, tc.abs, tc.armorBroken)) continue;
+                if (!damageAccepted(tc, dmg)) continue;
                 totalDmg += dmg;
                 anyTarget = true;
             }
@@ -806,7 +863,7 @@ public class AutoCrystalModule extends Module {
                         TargetCache tc = potentialTargets.get(i);
                         if (tc.pos.distanceToSqr(crystalCenter) > 144.0) continue;
                         float dmg = maxDamage(tc, crystalCenter);
-                        if (dmg < getDynamicMin(tc.hp, tc.abs, tc.armorBroken)) continue;
+                        if (!damageAccepted(tc, dmg)) continue;
                         boundTotal += dmg;
                         anyTarget = true;
                     }
@@ -856,7 +913,7 @@ public class AutoCrystalModule extends Module {
                 TargetCache tc = potentialTargets.get(j);
                 if (tc.pos.distanceToSqr(c.crystalCenter) > 144.0) continue;
                 float dmg = calcDamage(tc, c.crystalCenter);
-                if (dmg < getDynamicMin(tc.hp, tc.abs, tc.armorBroken)) continue;
+                if (!damageAccepted(tc, dmg)) continue;
                 totalDmg += dmg;
                 anyTarget = true;
             }
@@ -868,15 +925,51 @@ public class AutoCrystalModule extends Module {
     }
 
     private boolean isSlowPlaceThrottled(float damage) {
-        return slowPlace.getValue()
-                && damage <= slowPlaceThreshold.getValue()
+        return facePlace.getValue() == FacePlaceMode.SLOW
+                && damage <= facePlaceThreshold.getValue()
                 && !slowPlaceTimer.passedMs(SLOW_PLACE_INTERVAL_MS);
     }
 
     private void recordSlowPlace(float damage) {
-        if (slowPlace.getValue() && damage <= slowPlaceThreshold.getValue()) {
+        if (facePlace.getValue() == FacePlaceMode.SLOW && damage <= facePlaceThreshold.getValue()) {
             slowPlaceTimer.reset();
         }
+    }
+
+    private boolean damageAccepted(TargetCache tc, float damage) {
+        if (facePlace.getValue() == FacePlaceMode.FORCE) return damage > 0f;
+        return damage >= getDynamicMin(tc.hp, tc.abs, tc.armorBroken);
+    }
+
+    @Subscribe
+    private void onKeyInput(KeyInputEvent event) {
+        if (facePlaceBind.getValue().isEmpty() || event.getAction() != 1) return;
+        if (event.getKey() != facePlaceBind.getValue().getKey()) return;
+
+        FacePlaceMode next = switch (facePlace.getValue()) {
+            case SLOW   -> FacePlaceMode.NORMAL;
+            case NORMAL -> FacePlaceMode.FORCE;
+            case FORCE  -> FacePlaceMode.SLOW;
+        };
+        facePlace.setValue(next);
+        announceFacePlace(next);
+    }
+
+    private void announceFacePlace(FacePlaceMode mode) {
+        ChatFormatting color = switch (mode) {
+            case SLOW   -> ChatFormatting.AQUA;
+            case NORMAL -> ChatFormatting.BLUE;
+            case FORCE  -> ChatFormatting.LIGHT_PURPLE;
+        };
+        String label = switch (mode) {
+            case SLOW   -> "Slow";
+            case NORMAL -> "Normal";
+            case FORCE  -> "Force";
+        };
+
+        ChatUtil.sendPersistent("autocrystal:faceplace",
+                Component.literal("FacePlace: ").withStyle(ChatFormatting.GRAY)
+                        .append(Component.literal(label).withStyle(color, ChatFormatting.BOLD)));
     }
 
     private boolean isBurrowBlock(BlockState state) {
@@ -1153,7 +1246,7 @@ public class AutoCrystalModule extends Module {
     private void recordPlace(PlaceTarget target) {
         BlockPos airPos = target.base.above();
         crystalPlaces.put(airPos.asLong(), System.currentTimeMillis());
-        markRender(airPos);
+        markRender(airPos, target.damage);
         lastPlaceAir = airPos;
         lastPlaceSentNanos = System.nanoTime();
         lastPlaceTarget = target;
@@ -1205,7 +1298,7 @@ public class AutoCrystalModule extends Module {
         for (int i = 0, n = potentialTargets.size(); i < n; i++) {
             TargetCache tc = potentialTargets.get(i);
             if (tc.pos.distanceToSqr(crystalCenter) > 144.0) continue;
-            if (calcDamage(tc, crystalCenter) >= getDynamicMin(tc.hp, tc.abs, tc.armorBroken)) return true;
+            if (damageAccepted(tc, calcDamage(tc, crystalCenter))) return true;
             if (antiSurround.getValue() && isFeetAdjacent(tc.pos, airPos)) return true;
         }
         return false;
