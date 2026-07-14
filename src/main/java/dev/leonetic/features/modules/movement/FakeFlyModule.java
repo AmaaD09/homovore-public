@@ -3,6 +3,7 @@ package dev.leonetic.features.modules.movement;
 import dev.leonetic.Homovore;
 import dev.leonetic.event.impl.entity.player.PreTickEvent;
 import dev.leonetic.event.impl.entity.player.TickEvent;
+import dev.leonetic.event.impl.network.PacketEvent;
 import dev.leonetic.event.impl.render.Render2DEvent;
 import dev.leonetic.event.system.Subscribe;
 import dev.leonetic.features.modules.Module;
@@ -12,6 +13,7 @@ import dev.leonetic.util.inventory.InventoryUtil;
 import dev.leonetic.util.inventory.Result;
 import dev.leonetic.util.inventory.ResultType;
 import dev.leonetic.util.models.Timer;
+import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
 import net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
@@ -32,6 +34,7 @@ public class FakeFlyModule extends Module {
 
     public enum Mode { Legit, GrimDurability }
     public enum FireworkMode { Auto, Delay, None }
+    public enum HoverMode { Off, On, Freeze }
 
     private final Setting<Mode> mode = mode("Mode", Mode.GrimDurability);
     private final Setting<FireworkMode> fireworkMode = mode("FireworkMode", FireworkMode.Auto);
@@ -45,10 +48,15 @@ public class FakeFlyModule extends Module {
     private final Setting<Boolean> inventorySwap = bool("InventorySwap", true);
     private final Setting<Boolean> control = bool("Control", true);
     private final Setting<Double> fallSpeed = num("FallSpeed", 0.02, 0.0, 3.0);
-    private final Setting<Boolean> hover = bool("Hover", false);
+    private final Setting<HoverMode> hover = mode("Hover", HoverMode.Off);
+    private final Setting<Integer> packetGap = num("PacketGap", 20, 1, 100);
     private final Timer fireworkTimer = new Timer();
     private final Timer swapTimer = new Timer();
     private int packetDelayCounter = 0;
+    private double frozenX = Double.NaN;
+    private double frozenY = Double.NaN;
+    private double frozenZ = Double.NaN;
+    private int ticksSincePacket = 0;
 
     public FakeFlyModule() {
         super("FakeFly", "Firework elytra flight with GrimAC durability bypass.", Category.MOVEMENT);
@@ -58,6 +66,7 @@ public class FakeFlyModule extends Module {
         packetDelay.setVisibility(v -> mode.getValue() == Mode.GrimDurability);
         control.setVisibility(v -> mode.getValue() == Mode.GrimDurability);
         fallSpeed.setVisibility(v -> mode.getValue() == Mode.GrimDurability && control.getValue());
+        packetGap.setVisibility(v -> hover.getValue() == HoverMode.Freeze);
     }
 
     @Override
@@ -65,12 +74,15 @@ public class FakeFlyModule extends Module {
         fireworkTimer.setMs(99999);
         swapTimer.setMs(99999);
         packetDelayCounter = 0;
+        frozenX = frozenY = frozenZ = Double.NaN;
+        ticksSincePacket = 0;
     }
 
     @Override
     public void onDisable() {
         Homovore.TIMER = 1f;
         Homovore.TIMER_MOVEMENT_ONLY = false;
+        frozenX = frozenY = frozenZ = Double.NaN;
         if (mc.player == null) return;
         if (releaseSneak.getValue()) {
             long delay = releaseDelayMs.getValue().longValue();
@@ -117,12 +129,29 @@ public class FakeFlyModule extends Module {
             mc.player.startFallFlying();
         }
 
-        boolean isHovering = hover.getValue() && !wantToMove() && mc.player.isFallFlying();
+        boolean isHovering = hover.getValue() == HoverMode.On && !wantToMove() && mc.player.isFallFlying();
 
         if (mode.getValue() == Mode.Legit) {
             tickLegit(wearingElytra, hasFirework, isHovering);
         } else {
             tickGrimDurability(hasFirework, isHovering);
+        }
+
+        if (hover.getValue() == HoverMode.Freeze) {
+            if (wantToMove() || mc.player.onGround()) {
+                frozenX = frozenY = frozenZ = Double.NaN;
+            } else if (Double.isNaN(frozenY)) {
+                frozenX = mc.player.getX();
+                frozenY = mc.player.getY();
+                frozenZ = mc.player.getZ();
+            }
+
+            if (!Double.isNaN(frozenY)) {
+                mc.player.setDeltaMovement(0, 0, 0);
+                mc.player.setPos(frozenX, frozenY, frozenZ);
+            }
+        } else {
+            frozenX = frozenY = frozenZ = Double.NaN;
         }
     }
 
@@ -131,7 +160,7 @@ public class FakeFlyModule extends Module {
         if (nullCheck()) return;
 
         if (!mc.player.isFallFlying()) {
-            if (hover.getValue()) {
+            if (hover.getValue() == HoverMode.On) {
                 Homovore.TIMER = 1f;
                 Homovore.TIMER_MOVEMENT_ONLY = false;
             }
@@ -141,7 +170,7 @@ public class FakeFlyModule extends Module {
         boolean moving = wantToMove();
 
         Homovore.TIMER_MOVEMENT_ONLY = false;
-        if (hover.getValue() && !moving) {
+        if (hover.getValue() == HoverMode.On && !moving) {
             Homovore.TIMER = 0.05f;
         } else {
             Homovore.TIMER = 1f;
@@ -157,11 +186,36 @@ public class FakeFlyModule extends Module {
     @Subscribe
     private void onRender2DHover(Render2DEvent event) {
         if (nullCheck()) return;
-        if (!hover.getValue()) return;
+        if (hover.getValue() != HoverMode.On) return;
         if (!mc.player.isFallFlying()) return;
         if (wantToMove()) {
             Homovore.TIMER = 1f;
             Homovore.TIMER_MOVEMENT_ONLY = false;
+        }
+    }
+
+    @Subscribe
+    private void onPacketSend(PacketEvent.Send event) {
+        if (nullCheck() || hover.getValue() != HoverMode.Freeze || Double.isNaN(frozenY)) return;
+        if (!(event.getPacket() instanceof ServerboundMovePlayerPacket pkt)) return;
+        if (!pkt.hasPosition()) return;
+
+        ticksSincePacket++;
+        event.cancel();
+
+        if (ticksSincePacket >= packetGap.getValue()) {
+            ticksSincePacket = 0;
+            boolean onGround = mc.player.onGround();
+            boolean hc = mc.player.horizontalCollision;
+            mc.player.connection.send(new ServerboundMovePlayerPacket.PosRot(
+                    frozenX,
+                    frozenY,
+                    frozenZ,
+                    pkt.getYRot(mc.player.getYRot()),
+                    pkt.getXRot(mc.player.getXRot()),
+                    onGround,
+                    hc
+            ));
         }
     }
 

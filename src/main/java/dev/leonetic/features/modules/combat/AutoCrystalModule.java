@@ -101,15 +101,20 @@ public class AutoCrystalModule extends Module {
     private final Setting<Double>  pulseSpeed    = num("PulseSpeed", 2.0, 0.2, 6.0).setPage("Render");
     private final Setting<Double>  pulseExpand   = num("PulseExpand", 0.35, 0.0, 1.0).setPage("Render");
 
+    private final Setting<Double>  placeRange      = num("PlaceRange", 6.0, 1.0, 10.0).setPage("Advanced");
+    private final Setting<Double>  attackRange     = num("AttackRange", 3.0, 1.0, 6.0).setPage("Advanced");
+    private final Setting<Boolean> swingServerSide = bool("SwingServerSide", false).setPage("Advanced");
+
     private BlockPos renderPos = null;
     private long     renderStartMs = 0L;
     private AABB     smoothBox = null;
 
     private enum RenderMode { NONE, GRADIENT, GRADIENT_SMOOTH, BOX_SMOOTH, PULSE }
 
-    private static final double  PLACE_RANGE    = 6.0;
     private static final double  BASE_PLACE_RANGE = 6.0;
-    private static final double  BREAK_RANGE    = 3.0;
+
+    private double placeRange() { return placeRange.getValue(); }
+    private double breakRange() { return attackRange.getValue(); }
     private static final int     BALANCE        = 4;
     private static final double  HEALTH_BALANCE = 0.20;
     private static final double  ARMOR_BALANCE  = 0.20;
@@ -384,7 +389,7 @@ public class AutoCrystalModule extends Module {
         AABB bb = crystal.getBoundingBox();
         Vec3 reachEye = bestReachEye(bb);
         if (sqDistToBox(reachEye, bb.minX, bb.minY, bb.minZ, bb.maxX, bb.maxY, bb.maxZ)
-                > BREAK_RANGE * BREAK_RANGE) return;
+                > breakRange() * breakRange()) return;
 
         float optimisticSelf = maxDamageSelf(crystal.position());
         float playerHealth = mc.player.getHealth() + mc.player.getAbsorptionAmount();
@@ -398,7 +403,11 @@ public class AutoCrystalModule extends Module {
         diagInstaBreak++;
         mc.player.connection.send(
                 ServerboundInteractPacket.createAttackPacket(crystal, mc.player.isShiftKeyDown()));
-        mc.player.connection.send(new ServerboundSwingPacket(InteractionHand.MAIN_HAND));
+        if (swingServerSide.getValue()) {
+            mc.player.connection.send(new ServerboundSwingPacket(InteractionHand.MAIN_HAND));
+        } else {
+            mc.player.swing(InteractionHand.MAIN_HAND);
+        }
     }
 
     private void onBlockUpdate(BlockPos pos, boolean nowAir) {
@@ -413,13 +422,13 @@ public class AutoCrystalModule extends Module {
         AutoSwordModule sword = Homovore.moduleManager.getModuleByClass(AutoSwordModule.class);
         if (sword != null && sword.isEnabled() && sword.isMaceAttackReady()) return;
 
-        double cutoff = (PLACE_RANGE + 2.0) * (PLACE_RANGE + 2.0);
+        double cutoff = (placeRange() + 2.0) * (placeRange() + 2.0);
         if (mc.player.getEyePosition().distanceToSqr(Vec3.atCenterOf(pos)) > cutoff) return;
 
         updateSeeThrough();
 
         TargetsModule targets = Homovore.moduleManager.getModuleByClass(TargetsModule.class);
-        double scanRadius = PLACE_RANGE + 12.0;
+        double scanRadius = placeRange() + 12.0;
         List<TargetCache> potentialTargets = collectTargets(targets, scanRadius);
 
         if (doBreak.getValue() && breakTimer.passedMs(breakDelay.getValue())) {
@@ -485,7 +494,7 @@ public class AutoCrystalModule extends Module {
         boolean broke = false;
         if (doBreak.getValue() && breakTimer.passedMs(breakDelay.getValue())) {
             TargetsModule breakTargets = Homovore.moduleManager.getModuleByClass(TargetsModule.class);
-            List<TargetCache> breakTargetCache = collectTargets(breakTargets, BREAK_RANGE + 12.0);
+            List<TargetCache> breakTargetCache = collectTargets(breakTargets, breakRange() + 12.0);
             EndCrystal target = findBestCrystal(breakTargetCache);
             if (target != null) {
                 breakCrystal(target);
@@ -508,7 +517,7 @@ public class AutoCrystalModule extends Module {
 
         TargetsModule targets = Homovore.moduleManager.getModuleByClass(TargetsModule.class);
 
-        double scanRadius = PLACE_RANGE + 12.0
+        double scanRadius = placeRange() + 12.0
                 + (basePlace.getValue() ? BASE_PLACE_RANGE : 0.0);
         List<TargetCache> potentialTargets = collectTargets(targets, scanRadius);
 
@@ -594,13 +603,13 @@ public class AutoCrystalModule extends Module {
                     if (!PlaceUtil.canPlace(basePos)) continue;
 
                     if (sqDistToBox(eye, crystalPos.getX(), crystalPos.getY(), crystalPos.getZ(),
-                            crystalPos.getX() + 1, crystalPos.getY() + 1, crystalPos.getZ() + 1) > PLACE_RANGE * PLACE_RANGE) continue;
+                            crystalPos.getX() + 1, crystalPos.getY() + 1, crystalPos.getZ() + 1) > placeRange() * placeRange()) continue;
 
                     Vec3 crystalCenter = new Vec3(crystalPos.getX() + 0.5, crystalPos.getY(), crystalPos.getZ() + 0.5);
                     double cMinX = crystalCenter.x - 1, cMinZ = crystalCenter.z - 1;
                     double cMaxX = crystalCenter.x + 1, cMaxY = crystalCenter.y + 2, cMaxZ = crystalCenter.z + 1;
                     Vec3 breakEye = bestReachEye(new AABB(cMinX, crystalCenter.y, cMinZ, cMaxX, cMaxY, cMaxZ));
-                    if (sqDistToBox(breakEye, cMinX, crystalCenter.y, cMinZ, cMaxX, cMaxY, cMaxZ) > BREAK_RANGE * BREAK_RANGE) continue;
+                    if (sqDistToBox(breakEye, cMinX, crystalCenter.y, cMinZ, cMaxX, cMaxY, cMaxZ) > breakRange() * breakRange()) continue;
 
                     if (!anyTargetWithin(potentialTargets, crystalCenter, 144.0)) continue;
 
@@ -674,9 +683,9 @@ public class AutoCrystalModule extends Module {
         float bestDmg = 0;
         float playerHealth = mc.player.getHealth() + mc.player.getAbsorptionAmount();
         double maxSelf = maxSelfDamage.getValue();
-        double breakRangeSq = BREAK_RANGE * BREAK_RANGE;
+        double breakRangeSq = breakRange() * breakRange();
 
-        AABB searchArea = mc.player.getBoundingBox().inflate(BREAK_RANGE + 2);
+        AABB searchArea = mc.player.getBoundingBox().inflate(breakRange() + 2);
         for (Entity e : mc.level.getEntities(null, searchArea)) {
             if (!(e instanceof EndCrystal crystal)) continue;
 
@@ -714,7 +723,12 @@ public class AutoCrystalModule extends Module {
             "AutoCrystal_break", 60, angles[0], angles[1], RotationRequest.Mode.SILENT
         ));
         diagBreakSent++;
-        mc.gameMode.attack(mc.player, crystal);
+        if (swingServerSide.getValue()) {
+            mc.player.connection.send(ServerboundInteractPacket.createAttackPacket(crystal, mc.player.isShiftKeyDown()));
+            mc.player.connection.send(new ServerboundSwingPacket(InteractionHand.MAIN_HAND));
+        } else {
+            mc.gameMode.attack(mc.player, crystal);
+        }
     }
 
     private boolean canBreakCrystal(EndCrystal crystal, float yaw, float pitch) {
@@ -722,18 +736,18 @@ public class AutoCrystalModule extends Module {
         Vec3 eyePos = bestReachEye(bb);
         if (bb.contains(eyePos)) return true;
         Vec3 look = getLookVector(yaw, pitch);
-        Vec3 reachEnd = eyePos.add(look.scale(BREAK_RANGE));
+        Vec3 reachEnd = eyePos.add(look.scale(breakRange()));
         return bb.clip(eyePos, reachEnd).isPresent();
     }
 
     private PlaceTarget findBestPlace(List<TargetCache> potentialTargets) {
         Vec3 eyePos = mc.player.getEyePosition(1.0f);
         BlockPos playerPos = mc.player.blockPosition();
-        int r = (int) Math.ceil(PLACE_RANGE);
+        int r = (int) Math.ceil(placeRange());
         long now = System.currentTimeMillis();
         boolean isEnd = mc.level.dimension().equals(Level.END);
-        double placeRangeSq = PLACE_RANGE * PLACE_RANGE;
-        double breakRangeSq = BREAK_RANGE * BREAK_RANGE;
+        double placeRangeSq = placeRange() * placeRange();
+        double breakRangeSq = breakRange() * breakRange();
         double maxSelf = maxSelfDamage.getValue();
         float playerHealth = mc.player.getHealth() + mc.player.getAbsorptionAmount();
         BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
@@ -896,11 +910,11 @@ public class AutoCrystalModule extends Module {
     private PlaceTarget findAntiChinesePlace() {
         Vec3 eyePos = mc.player.getEyePosition(1.0f);
         BlockPos playerPos = mc.player.blockPosition();
-        int r = (int) Math.ceil(PLACE_RANGE);
+        int r = (int) Math.ceil(placeRange());
         long now = System.currentTimeMillis();
         boolean isEnd = mc.level.dimension().equals(Level.END);
-        double placeRangeSq = PLACE_RANGE * PLACE_RANGE;
-        double breakRangeSq = BREAK_RANGE * BREAK_RANGE;
+        double placeRangeSq = placeRange() * placeRange();
+        double breakRangeSq = breakRange() * breakRange();
         double maxSelf = maxSelfDamage.getValue();
         float playerHealth = mc.player.getHealth() + mc.player.getAbsorptionAmount();
         BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
@@ -955,11 +969,11 @@ public class AutoCrystalModule extends Module {
     private EndCrystal findAntiChineseCrystal() {
         float playerHealth = mc.player.getHealth() + mc.player.getAbsorptionAmount();
         double maxSelf = maxSelfDamage.getValue();
-        double breakRangeSq = BREAK_RANGE * BREAK_RANGE;
+        double breakRangeSq = breakRange() * breakRange();
 
         EndCrystal best = null;
         double bestDist = Double.MAX_VALUE;
-        AABB searchArea = mc.player.getBoundingBox().inflate(BREAK_RANGE + 2);
+        AABB searchArea = mc.player.getBoundingBox().inflate(breakRange() + 2);
         for (Entity e : mc.level.getEntities(null, searchArea)) {
             if (!(e instanceof EndCrystal crystal)) continue;
 
@@ -1133,18 +1147,18 @@ public class AutoCrystalModule extends Module {
 
         int bx = airPos.getX(), by = airPos.getY(), bz = airPos.getZ();
         Vec3 eye = mc.player.getEyePosition(1.0f);
-        if (sqDistToBox(eye, bx, by, bz, bx + 1, by + 1, bz + 1) > PLACE_RANGE * PLACE_RANGE) return false;
+        if (sqDistToBox(eye, bx, by, bz, bx + 1, by + 1, bz + 1) > placeRange() * placeRange()) return false;
 
         double cx = bx + 0.5, cy = by, cz = bz + 0.5;
         if (sqDistToBox(bestReachEye(new AABB(cx - 1, cy, cz - 1, cx + 1, cy + 2, cz + 1)),
-                cx - 1, cy, cz - 1, cx + 1, cy + 2, cz + 1) > BREAK_RANGE * BREAK_RANGE) return false;
+                cx - 1, cy, cz - 1, cx + 1, cy + 2, cz + 1) > breakRange() * breakRange()) return false;
 
         Vec3 crystalCenter = new Vec3(cx, cy, cz);
         float playerHealth = mc.player.getHealth() + mc.player.getAbsorptionAmount();
         if (!selfDamageOk(crystalCenter, null, maxSelfDamage.getValue(), playerHealth)) return false;
 
         TargetsModule targets = Homovore.moduleManager.getModuleByClass(TargetsModule.class);
-        List<TargetCache> potentialTargets = collectTargets(targets, PLACE_RANGE + 12.0);
+        List<TargetCache> potentialTargets = collectTargets(targets, placeRange() + 12.0);
         for (int i = 0, n = potentialTargets.size(); i < n; i++) {
             TargetCache tc = potentialTargets.get(i);
             if (tc.pos.distanceToSqr(crystalCenter) > 144.0) continue;

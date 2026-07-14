@@ -69,6 +69,8 @@ public class AutoTrapModule extends Module {
     private final Setting<Boolean> faceFirst        = bool("FaceFirst", true).setPage("Prediction");
     private final Setting<Integer> faceLeadBlocks   = num("FaceLeadBlocks", 2, 0, 6).setPage("Prediction");
 
+    private final Setting<Double>  placeRange       = num("PlaceRange", 5.1, 1.0, 10.0).setPage("Advanced");
+
     private final Setting<Boolean> render           = bool("Render", true).setPage("Render");
     private final Setting<Float>   fadeTime         = num("FadeTime", 1.0f, 0.05f, 2.0f).setPage("Render");
     private final Setting<Color>   fillColor        = color("FillColor", 255, 50, 50, 40).setPage("Render");
@@ -216,7 +218,7 @@ public class AutoTrapModule extends Module {
         List<BlockPos> reachable = new ArrayList<>();
         Vec3 eye = mc.player.getEyePosition();
         for (BlockPos pos : placePoses) {
-            if (eye.distanceTo(Vec3.atCenterOf(pos)) <= 5.1) {
+            if (eye.distanceTo(Vec3.atCenterOf(pos)) <= placeRange.getValue()) {
                 reachable.add(pos.immutable());
             }
         }

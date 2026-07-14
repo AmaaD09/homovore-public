@@ -37,12 +37,15 @@ public class AutoSwordModule extends Module {
 
     public enum TpsMode { NONE, LATEST, AVERAGE }
 
-    private static final double RANGE = 3.0;
+    private double attackRangeVal() { return attackRange.getValue(); }
 
     private final Setting<Double> delay = num("Delay", 0.92, 0.0, 1.0);
     private final Setting<Boolean> swing = bool("Swing", true);
     private final Setting<Boolean> render = bool("Render", true);
     private final Setting<TpsMode> tpsMode = mode("TPS", TpsMode.LATEST);
+
+    private final Setting<Double>  placeRange  = num("PlaceRange", 6.0, 1.0, 10.0).setPage("Advanced");
+    private final Setting<Double>  attackRange = num("AttackRange", 3.0, 1.0, 6.0).setPage("Advanced");
 
     private final Setting<Boolean> criticals = bool("Criticals", false);
     private final Setting<Boolean> critsWithSword = bool("CritsWithSword", true)
@@ -107,7 +110,7 @@ public class AutoSwordModule extends Module {
         float serverPitch = Homovore.rotationManager.getServerPitch();
         if (!currentTarget.getBoundingBox().contains(eyePos)) {
             Vec3 lookVec = getLookVector(serverYaw, serverPitch);
-            Vec3 reachEnd = eyePos.add(lookVec.scale(RANGE));
+            Vec3 reachEnd = eyePos.add(lookVec.scale(attackRangeVal()));
             if (currentTarget.getBoundingBox().clip(eyePos, reachEnd).isEmpty()) return;
         }
 
@@ -240,11 +243,11 @@ public class AutoSwordModule extends Module {
         Entity best = null;
         double bestDist = Double.MAX_VALUE;
 
-        for (Entity entity : mc.level.getEntities(null, mc.player.getBoundingBox().inflate(RANGE + 1))) {
+        for (Entity entity : mc.level.getEntities(null, mc.player.getBoundingBox().inflate(attackRangeVal() + 1))) {
             if (!targets.isValidTarget(entity)) continue;
 
             double dist = eyePos.distanceTo(clampToBox(eyePos, entity.getBoundingBox()));
-            if (dist > RANGE) continue;
+            if (dist > attackRangeVal()) continue;
             if (dist < bestDist) {
                 bestDist = dist;
                 best = entity;
@@ -265,6 +268,10 @@ public class AutoSwordModule extends Module {
     }
 
     private int getWeapon() {
+        dev.leonetic.features.modules.movement.FakeFlyModule fakeFly =
+                Homovore.moduleManager.getModuleByClass(dev.leonetic.features.modules.movement.FakeFlyModule.class);
+        boolean prioritizeMace = fakeFly != null && fakeFly.isEnabled();
+
         int bestSlot = -1;
         float bestDamage = -1f;
 
@@ -278,6 +285,11 @@ public class AutoSwordModule extends Module {
             boolean isMace = held.getItem() instanceof MaceItem;
 
             if (!isSword && !isAxe && !isTrident && !isMace) continue;
+
+            if (prioritizeMace) {
+                if (isMace) return slot;
+                continue;
+            }
 
             float attackDamage = 0f;
 
