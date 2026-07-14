@@ -64,9 +64,7 @@ public class PistonCrystalModule extends Module {
     private net.minecraft.world.Difficulty   targetDifficulty;
 
     public PistonCrystalModule() {
-        super("PistonCrystal",
-              "piss crystal",
-              Category.COMBAT);
+        super("PistonCrystal","piss crystal",Category.COMBAT);
     }
 
     @Override
